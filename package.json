@@ -21,7 +21,7 @@
   "bugs": {
     "url": "https://github.com/pm-2001/my-pets/issues"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "author": "pm-2001",
   "main": "dist-electron/main.js",
   "bin": {

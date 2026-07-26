@@ -408,6 +408,16 @@ typecheck and full build, and `files` includes only `dist/`, `dist-electron/` (w
 universal `deskscan` binary), `bin/`, and this README. The only runtime dependency is
 `electron`.
 
+**From the browser (no terminal).** A GitHub Action (`.github/workflows/publish.yml`)
+publishes on every GitHub Release. One-time setup: create an npm **Automation** token at
+[npmjs.com → Access Tokens](https://www.npmjs.com/settings/~/tokens), then add it to the repo
+as a secret named `NPM_TOKEN` (GitHub → **Settings → Secrets and variables → Actions → New
+repository secret**). After that, publishing is: bump `version` in `package.json`, then on
+GitHub go to **Releases → Draft a new release**, create a tag like `v0.1.0`, and **Publish
+release** — the Action builds on a macOS runner and pushes to npm.
+
+**From the terminal (Mac with Xcode CLI tools):**
+
 ```bash
 npm login
 npm publish            # runs typecheck + build, then publishes
@@ -431,7 +441,5 @@ npm install /path/to/meowverlay-<version>.tgz
 
 ## Licence
 
-No licence has been chosen yet, which means the code is "all rights reserved" by default —
-fine for running from source, but a blocker for outside contributions. If you want to accept
-community contributions, add a permissive licence (e.g. MIT) at the repo root and note it
-here; contributors should not send PRs assuming one until it exists.
+[MIT](LICENSE) © pm-2001. Use it, fork it, ship it — the full text lives in
+[`LICENSE`](LICENSE) at the repo root and travels with the npm package.
