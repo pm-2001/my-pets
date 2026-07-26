@@ -1,9 +1,40 @@
 {
   "name": "desktop-pet",
   "version": "0.1.0",
-  "private": true,
-  "description": "An autonomous animated pet that lives on your macOS desktop",
+  "description": "An autonomous animated cat that lives on your macOS desktop",
+  "keywords": [
+    "desktop-pet",
+    "pet",
+    "cat",
+    "electron",
+    "macos",
+    "overlay",
+    "menubar",
+    "shimeji"
+  ],
+  "homepage": "https://github.com/pm-2001/my-pets#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pm-2001/my-pets.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pm-2001/my-pets/issues"
+  },
+  "license": "UNLICENSED",
+  "author": "pm-2001",
   "main": "dist-electron/main.js",
+  "bin": {
+    "desktop-pet": "bin/desktop-pet.mjs"
+  },
+  "files": [
+    "dist",
+    "dist-electron",
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "native": "bash electron/native/build.sh && node scripts/gen-tray.mjs",
     "build:electron": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --target=node20 --format=cjs --outdir=dist-electron --external:electron",
@@ -11,24 +42,26 @@
     "dev": "npm run native && npm run build:electron && concurrently -k -n vite,electron -c cyan,magenta \"vite\" \"wait-on tcp:5173 && cross-env VITE_DEV=1 electron .\"",
     "build": "npm run native && npm run build:electron && vite build",
     "start": "npm run build && electron .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "dependencies": {
+    "electron": "^33.2.1"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
-    "electron": "^33.2.1",
     "esbuild": "^0.24.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
     "wait-on": "^8.0.1"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.115.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
   }
 }

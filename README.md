@@ -41,14 +41,27 @@ Silicon, Node 25, Electron 33.
 
 ---
 
-## Requirements
+## Install
 
-- **macOS** (the window layer and the `deskscan` helper are macOS-specific)
-- **Node.js 20+** (developed on 25.9)
-- **Xcode Command Line Tools** — provides `swiftc`, needed to build the window-scanner
-  helper. Install with `xcode-select --install`
+**macOS**, from your terminal — no clone, no Xcode:
 
-## Setup
+```bash
+npx desktop-pet            # run it once
+# or install the command:
+npm i -g desktop-pet && desktop-pet
+```
+
+A cat appears at the bottom of your screen and a small cat icon appears in your menu bar.
+**Quit from the menu-bar icon** — there is no dock icon and no window to close.
+
+The published package ships the app prebuilt, including a **universal** (Apple Silicon +
+Intel) copy of the window-scanner helper, so end users need only Node 20+ — not Xcode. On
+**Windows and Linux** the command installs but prints a "macOS only" notice and exits; those
+platforms are not supported yet (see [Roadmap](#roadmap)).
+
+> Requires **macOS 11+** and **Node.js 20+**.
+
+## Run from source (development)
 
 ```bash
 git clone git@github.com:pm-2001/my-pets.git
@@ -57,10 +70,9 @@ npm install
 npm start
 ```
 
-`npm start` compiles the Swift helper, generates the tray icon, bundles everything, and
-launches the app. A cat appears at the bottom of your screen and a small cat icon appears
-in your menu bar. **Quit from the menu-bar icon** — there is no dock icon and no window
-to close.
+This route *does* need the **Xcode Command Line Tools** (`xcode-select --install`) for
+`swiftc` to compile the helper. `npm start` compiles the Swift helper, generates the tray
+icon, bundles everything, and launches the app.
 
 ### Scripts
 
@@ -388,6 +400,32 @@ transparent, always-on-top window without Screen Recording permission.
 Match the surrounding style: small modules, generous comments that explain *why*, and no new
 runtime dependencies unless there is a strong reason. Then branch, commit, and open a pull
 request against `main` describing what changed and how you checked it.
+
+### Publishing to npm (maintainers)
+
+The package is set up so `npm publish` ships a runnable app — `prepublishOnly` runs the
+typecheck and full build, and `files` includes only `dist/`, `dist-electron/` (with the
+universal `deskscan` binary), `bin/`, and this README. The only runtime dependency is
+`electron`.
+
+```bash
+npm login
+npm publish            # runs typecheck + build, then publishes
+```
+
+Publish from a Mac with the Xcode Command Line Tools so the universal helper builds. Bump
+`version` first (`npm version patch`). If the name `desktop-pet` is already taken on npm,
+publish under a scope — set `"name": "@pm-2001/desktop-pet"` and run
+`npm publish --access public`; the install command becomes `npx @pm-2001/desktop-pet` while
+the launched command stays `desktop-pet`. Verify a release end to end by installing the
+packed tarball into a scratch directory before publishing:
+
+```bash
+npm pack
+mkdir /tmp/pettest && cd /tmp/pettest && npm init -y
+npm install /path/to/desktop-pet-<version>.tgz
+./node_modules/.bin/desktop-pet
+```
 
 ---
 
