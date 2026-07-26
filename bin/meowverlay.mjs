@@ -67,7 +67,15 @@ if (!electron) {
   if (dir) {
     console.error('meowverlay: first-run setup — downloading the Electron runtime…')
     try {
-      const res = spawnSync(process.execPath, [join(dir, 'install.js')], { stdio: 'inherit', cwd: dir })
+      // Force the real download even when the environment tells Electron's
+      // installer to skip it. ELECTRON_SKIP_BINARY_DOWNLOAD (set by some CI and
+      // security tooling) makes install.js exit 0 without fetching the binary,
+      // which is exactly the "installed but no runtime" state we are recovering
+      // from — so strip it (and the mirror override) for this run.
+      const env = { ...process.env }
+      delete env.ELECTRON_SKIP_BINARY_DOWNLOAD
+      delete env.ELECTRON_OVERRIDE_DIST_PATH
+      const res = spawnSync(process.execPath, [join(dir, 'install.js')], { stdio: 'inherit', cwd: dir, env })
       if (res.status === 0) electron = resolveElectron()
     } catch {
       // fall through to guidance
@@ -84,15 +92,16 @@ if (!electron) {
     yarn: 'yarn global add meowverlay',
     bun: 'bun add -g --trust meowverlay',
   }
+  const npmRootHint = 'env -u ELECTRON_SKIP_BINARY_DOWNLOAD node "$(npm root -g)/meowverlay/node_modules/electron/install.js"'
   console.error(
     '\nCould not set up the Electron runtime automatically' +
       (installedButBroken ? ' (its binary is missing).' : ' (electron is not installed).') +
-      '\n' +
-      (pm
-        ? `Reinstall so its setup script is allowed to run:\n\n  ${advice[pm]}\n`
-        : 'No package manager (npm/pnpm/yarn/bun) was found on your PATH.\n' +
-          'Install Node.js 20+ (which includes npm) from https://nodejs.org, then:\n\n' +
-          '  npm i -g meowverlay --allow-scripts=electron\n'),
+      '\n\nIf ELECTRON_SKIP_BINARY_DOWNLOAD is set in your environment, it blocks the\n' +
+      'download. Fetch the runtime once with it unset:\n\n' +
+      `  ${npmRootHint}\n\n` +
+      'Otherwise reinstall so the setup script can run:\n\n' +
+      `  ${pm ? advice[pm] : advice.npm}\n` +
+      (pm ? '' : '\n(Install Node.js 20+ from https://nodejs.org if you have no package manager.)\n'),
   )
   process.exit(1)
 }
