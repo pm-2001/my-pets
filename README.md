@@ -52,14 +52,17 @@ npm i -g meowverlay && meowverlay
 ```
 
 A cat appears at the bottom of your screen and a small cat icon appears in your menu bar.
-**Quit from the menu-bar icon** — there is no dock icon and no window to close.
+It runs **in the background** (the command returns your prompt right away), so you can close
+the terminal and it keeps living there. **Quit from the menu-bar icon** — there is no dock
+icon and no window to close.
 
 The published package ships the app prebuilt, including a **universal** (Apple Silicon +
 Intel) copy of the window-scanner helper, so end users need only Node 20+ — not Xcode. On
 **Windows and Linux** the command installs but prints a "macOS only" notice and exits; those
 platforms are not supported yet (see [Roadmap](#roadmap)).
 
-> Requires **macOS 11+** and **Node.js 20+**.
+> Requires **macOS 11+** and **Node.js 20 or 22 (LTS)**. A *nightly/odd-numbered* Node can
+> break Electron's install step — see [Troubleshooting](#troubleshooting).
 
 ## Run from source (development)
 
@@ -83,6 +86,40 @@ icon, bundles everything, and launches the app.
 | `npm run build` | Build everything into `dist/` and `dist-electron/` |
 | `npm run typecheck` | `tsc --noEmit` across main, preload and renderer |
 | `npm run native` | Rebuild just the Swift helper and the tray icon |
+
+## Troubleshooting
+
+**"Could not set up the Electron runtime" / no cat appears after install.** The `electron`
+dependency downloads its ~90 MB binary in a postinstall step, and a few environments break
+that:
+
+- **Nightly / bleeding-edge Node** (e.g. Node 26). Electron's unzip step can silently do
+  nothing on an unsupported Node, so the binary never unpacks. Use **Node 20 or 22 (LTS)** —
+  the surest fix: `brew install node@22 && brew link --overwrite --force node@22`, then a new
+  terminal.
+- **npm configured to block install scripts** (you'll see `npm warn allow-scripts … electron
+  (postinstall)`). Allow just Electron's: `npm i -g meowverlay --allow-scripts=electron`.
+- **`ELECTRON_SKIP_BINARY_DOWNLOAD` set** in your shell/CI. Unset it for the install:
+  `env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm i -g meowverlay`.
+- **A corrupt Electron cache** (a "Cache hit" that never unpacks). Clear it and retry:
+  `rm -rf ~/Library/Caches/electron`.
+
+As a last resort, unpack the already-downloaded zip by hand:
+
+```bash
+EL="$(npm root -g)/meowverlay/node_modules/electron"
+ZIP=$(ls "$HOME"/Library/Caches/electron/*/electron-*.zip | head -1)
+rm -rf "$EL/dist" "$EL/path.txt" && mkdir -p "$EL/dist"
+unzip -q "$ZIP" -d "$EL/dist"
+printf 'Electron.app/Contents/MacOS/Electron' > "$EL/path.txt"
+```
+
+**The cat quits when I close the terminal.** Fixed in 0.1.4+, which launches detached by
+default. On older versions, run it in the background: `nohup meowverlay >/dev/null 2>&1 &`.
+
+**No menu-bar icon.** It sits near the notch and can hide behind other menu-bar items; the
+tray shows a `🐱` label to make it findable. A menu-bar manager (Bartender/Ice) may tuck it
+into its overflow.
 
 ---
 
