@@ -32,6 +32,8 @@ export interface NeedContext {
   asleep: boolean
   /** Distance in points from pet to cursor. */
   cursorDistance: number
+  /** Distance to the nearest other pet on the same display; Infinity if alone. */
+  nearestPetDistance: number
 }
 
 export function tickNeeds(needs: Needs, traits: Traits, ctx: NeedContext, dt: number): Needs {
@@ -48,9 +50,11 @@ export function tickNeeds(needs: Needs, traits: Traits, ctx: NeedContext, dt: nu
 
   const curiosityRate = 0.3 + traits.curiosity * 1.1
 
-  // Loneliness needs both absence and a sociable disposition to matter.
-  const nearCursor = ctx.cursorDistance < 140
-  const lonelyRate = nearCursor ? -3.5 : (userAway ? 0.5 : 0.2) * (0.3 + traits.sociability * 1.8)
+  // Loneliness needs both absence and a sociable disposition to matter. Company
+  // is company: a nearby cursor *or* another pet nearby soothes it, which is what
+  // pulls a lonely pet towards its companions and lets them settle in a pile.
+  const nearCompany = ctx.cursorDistance < 140 || ctx.nearestPetDistance < 150
+  const lonelyRate = nearCompany ? -3.5 : (userAway ? 0.5 : 0.2) * (0.3 + traits.sociability * 1.8)
 
   // Excitement is spiky by nature: it is added to by events and always decays.
   const excitementRate = -1.4 + (ctx.idleSeconds < 2 ? 0.9 + traits.energy : 0)

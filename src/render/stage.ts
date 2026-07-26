@@ -1,26 +1,27 @@
-import { Application } from 'pixi.js'
-import type { PetMemory, Settings, WorldEnv, WorldPulse } from '@shared/types'
+import type { PetAssignment, PetSpawn, Settings, WorldEnv, WorldPulse } from '@shared/types'
 import { Desktop } from '../world/desktop'
-import { Pet, PET_HEIGHT } from '../brain/pet'
+import { Pet, PET_HEIGHT, type AnimState } from '../brain/pet'
+import type { ActionId } from '../brain/actions'
 import { CatRenderer } from './cat'
 
 /**
  * Owns the render loop and the bridge between the simulation (global desktop
  * coordinates) and the canvas (window-local coordinates).
  *
- * The canvas is deliberately *not* the size of the window. The overlay spans the
- * whole screen so the pet can walk anywhere, but a screen-sized canvas at Retina
- * density means rasterising and compositing several million pixels every frame
- * for a sprite that occupies a few thousand of them. Instead the canvas is a
- * small viewport that is moved with a compositor-only transform, and the pet is
- * drawn at a fixed anchor inside it.
+ * There is one Stage per overlay window, i.e. one per display. It draws every
+ * pet currently living on its display onto a single full-window Canvas2D layer,
+ * clearing only the pixels each pet actually touches. A pet that walks off a
+ * display edge with a neighbour beyond it is handed to that neighbour's window;
+ * because coordinates are global, the receiving stage just keeps simulating from
+ * the same numbers.
  *
- * Also owns hit-testing: this is the only code that knows where the pet's pixels
- * actually are, so it is the only code that can decide when the click-through
- * overlay should become solid.
+ * Also owns hit-testing: this is the only code that knows where each pet's pixels
+ * are, so it is the only code that can decide when the click-through overlay
+ * should become solid.
  */
 
 export interface StageState {
+  petId: number
   /** Pet position in window-local coordinates, for placing DOM overlays. */
   screenX: number
   screenY: number
@@ -31,108 +32,117 @@ export interface StageState {
   standingOn: string | null
 }
 
-/** Viewport size in CSS pixels — large enough for the pet at maximum scale. */
-const VIEW_W = 320
-const VIEW_H = 300
-/** Where the pet's feet sit inside the viewport. */
-const ANCHOR_X = VIEW_W / 2
-const ANCHOR_Y = VIEW_H - 40
-
 /** Extra pixels around the sprite that still count as "on the pet" for clicks. */
 const HIT_PADDING = 8
 
+interface Entry {
+  pet: Pet
+  cat: CatRenderer
+  /** Device-independent box cleared last frame, so it can be erased this frame. */
+  lastBox: { left: number; top: number; width: number; height: number } | null
+  /** Fraction across the display to spawn at, once bounds are known. */
+  spawnFraction: number
+  needsSpawn: boolean
+  /** Previous grounded state, to fire the landing squash on the touch-down frame. */
+  wasGrounded: boolean
+}
+
 export class Stage {
   readonly desktop = new Desktop()
-  readonly pet: Pet
-  private app = new Application()
-  private cat: CatRenderer
+  private entries = new Map<number, Entry>()
+  private canvas!: HTMLCanvasElement
+  private ctx!: CanvasRenderingContext2D
+  private dpr = 1
   private settings: Settings
+  private displayId = -1
+
   private interactive = false
-  private lastFrame = performance.now()
-  private wasGrounded = true
   private hovered = false
+  private hoveredPetId: number | null = null
   private forceInteractive = false
-  private spawned = false
-  private lastViewX = Number.NaN
-  private lastViewY = Number.NaN
+  private activePetId: number | null = null
+
+  private lastFrame = performance.now()
   private debugFrames = 0
   private debugSince = performance.now()
   private targetFps = 30
   private running = false
   private rafHandle = 0
   private timerHandle: ReturnType<typeof setTimeout> | null = null
-  private onState: (state: StageState) => void = () => {}
+  private onState: (state: StageState | null) => void = () => {}
+  private onClick: (petId: number) => void = () => {}
 
-  constructor(memory: PetMemory, settings: Settings) {
-    this.pet = new Pet(memory.personality, memory.seed)
-    this.cat = new CatRenderer(this.pet.palette)
+  constructor(settings: Settings) {
     this.settings = settings
+    this.desktop.useWindows = settings.useWindows
   }
 
-  async init(mount: HTMLElement, onState: (state: StageState) => void, onClick: () => void): Promise<void> {
-    await this.app.init({
-      backgroundAlpha: 0,
-      width: VIEW_W,
-      height: VIEW_H,
-      antialias: true,
-      // Match the display so the pet is crisp on Retina without oversampling.
-      resolution: window.devicePixelRatio,
-      autoDensity: true,
-      // We drive the loop ourselves so the frame rate can be throttled by state.
-      autoStart: false,
-    })
+  async init(
+    mount: HTMLElement,
+    onState: (state: StageState | null) => void,
+    onClick: (petId: number) => void,
+  ): Promise<void> {
+    this.onState = onState
+    this.onClick = onClick
 
-    const canvas = this.app.canvas
+    const canvas = document.createElement('canvas')
     canvas.style.position = 'absolute'
-    canvas.style.left = '0'
-    canvas.style.top = '0'
-    // translate3d keeps viewport movement on the compositor instead of
-    // triggering layout every frame.
-    canvas.style.willChange = 'transform'
+    canvas.style.inset = '0'
+    canvas.style.width = '100%'
+    canvas.style.height = '100%'
     mount.appendChild(canvas)
-
-    this.app.stage.addChild(this.cat.root)
-    this.cat.root.position.set(ANCHOR_X, ANCHOR_Y)
+    this.canvas = canvas
+    this.ctx = canvas.getContext('2d')!
+    this.resize()
+    window.addEventListener('resize', this.resize)
 
     canvas.addEventListener('pointerdown', (event) => {
-      // Clicks that land on the transparent part of the viewport belong to
-      // whatever is underneath, not to the pet.
-      if (!this.hovered) return
+      // Clicks that land on the transparent part of the overlay belong to
+      // whatever is underneath, not to any pet.
+      if (this.hoveredPetId === null) return
       event.preventDefault()
-      onClick()
+      this.onClick(this.hoveredPetId)
     })
 
-    // Pixi's own ticker is not used. Its `maxFPS` throttles the *update* but
-    // still requests an animation frame every display refresh — on a 120Hz
-    // panel that is 120 wakeups a second no matter how slowly the pet is
-    // animating, and it dominated the idle cost. Instead a timer sets the pace
-    // and a single rAF aligns the render to vsync, so wakeups scale with the
-    // frame rate we actually want.
-    this.app.ticker.stop()
-    this.onState = onState
     this.running = true
     this.scheduleNext()
+  }
+
+  /** Size the backing store to the display in device pixels; work in CSS px. */
+  private resize = (): void => {
+    this.dpr = window.devicePixelRatio || 1
+    const w = window.innerWidth
+    const h = window.innerHeight
+    this.canvas.width = Math.round(w * this.dpr)
+    this.canvas.height = Math.round(h * this.dpr)
+    // Reset every pet's remembered box; the whole surface is blank after a resize.
+    for (const entry of this.entries.values()) entry.lastBox = null
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
   }
 
   private scheduleNext(): void {
     if (!this.running) return
     const delay = Math.max(0, 1000 / this.targetFps - 2)
     this.timerHandle = setTimeout(() => {
+      // A timer sets the pace and a single rAF aligns the render to vsync, so
+      // wakeups scale with the frame rate we actually want rather than the
+      // display's refresh rate.
       this.rafHandle = requestAnimationFrame(() => {
         if (!this.running) return
-        this.frame(this.onState)
-        this.app.render()
+        this.frame()
         this.scheduleNext()
       })
     }, delay)
   }
 
-  /**
-   * Hold the window solid regardless of cursor position. Needed while the speech
-   * bubble is open, or the user could not click into its input field.
-   */
+  /** Hold the window solid regardless of cursor position (while a bubble is open). */
   setForceInteractive(force: boolean): void {
     this.forceInteractive = force
+  }
+
+  /** Which pet a DOM bubble is currently attached to, so we report its position. */
+  setActivePet(petId: number | null): void {
+    this.activePetId = petId
   }
 
   setSettings(settings: Settings): void {
@@ -143,136 +153,297 @@ export class Stage {
   applyEnv(env: WorldEnv): void {
     this.desktop.updateEnv(env)
     this.desktop.useWindows = this.settings.useWindows
-
-    // The pet cannot be placed until we know where the screen actually is, so
-    // spawning waits for the first env that carries display geometry.
-    if (!this.spawned && env.displays.length > 0) {
-      this.pet.spawn(this.desktop)
-      this.spawned = true
-    }
   }
 
   applyPulse(pulse: WorldPulse): void {
     this.desktop.updatePulse(pulse)
   }
 
-  poke(): void {
-    this.pet.poke()
+  /** Main told this window which display it is and the exact set of pets it owns. */
+  applyAssignment(assignment: PetAssignment): void {
+    this.displayId = assignment.displayId
+    this.desktop.setDisplay(assignment.displayId)
+
+    const wanted = new Set(assignment.pets.map((p) => p.id))
+    // Drop pets no longer assigned here.
+    let removed = false
+    for (const id of [...this.entries.keys()]) {
+      if (!wanted.has(id)) {
+        this.removePet(id)
+        removed = true
+      }
+    }
+    // Belt and braces: if the population shrank, wipe the whole surface so a
+    // departed pet cannot leave a stale silhouette behind, whatever its box was.
+    if (removed && this.ctx) {
+      this.ctx.clearRect(0, 0, window.innerWidth, window.innerHeight)
+      for (const entry of this.entries.values()) entry.lastBox = null
+    }
+    if (window.pet.debug) {
+      console.log(`[assign] display=${assignment.displayId} wanted=${[...wanted].join(',')} entries=${this.entries.size} removed=${removed}`)
+    }
+    // Add newly assigned pets, spread across the display so they do not stack.
+    assignment.pets.forEach((identity, index) => {
+      if (this.entries.has(identity.id)) return
+      const fraction = (index + 1) / (assignment.pets.length + 1)
+      const pet = new Pet(identity.personality, identity.seed)
+      this.entries.set(identity.id, {
+        pet,
+        cat: new CatRenderer(pet.palette),
+        lastBox: null,
+        spawnFraction: fraction,
+        needsSpawn: true,
+        wasGrounded: true,
+      })
+    })
+  }
+
+  /** A pet arriving from another display, mid-stride. Resume its live state. */
+  receivePet(spawn: PetSpawn): void {
+    if (this.entries.has(spawn.id)) return
+    const pet = new Pet(spawn.personality, spawn.seed)
+    if (spawn.live) pet.restore(spawn.live)
+    else pet.spawn(this.desktop)
+    this.entries.set(spawn.id, {
+      pet,
+      cat: new CatRenderer(pet.palette),
+      lastBox: null,
+      spawnFraction: 0.5,
+      needsSpawn: false,
+      wasGrounded: pet.grounded,
+    })
+  }
+
+  private removePet(id: number): void {
+    const entry = this.entries.get(id)
+    if (!entry) return
+    if (entry.lastBox) this.clearBox(entry.lastBox)
+    this.entries.delete(id)
+    if (this.activePetId === id) this.activePetId = null
+    if (this.hoveredPetId === id) this.hoveredPetId = null
+  }
+
+  /** Tray "Say hi" pokes whichever pet is on this display; returns the poked id. */
+  pokeAny(): number | null {
+    const first = this.entries.values().next().value as Entry | undefined
+    if (!first) return null
+    first.pet.poke()
+    return first.pet.id
+  }
+
+  poke(petId: number): void {
+    this.entries.get(petId)?.pet.poke()
+  }
+
+  /** Drive a pet from a spoken command (see App's intent parser). */
+  command(petId: number, intent: string): void {
+    const pet = this.entries.get(petId)?.pet
+    if (!pet) return
+    if (intent === 'hop') pet.hop()
+    else if (intent === 'wake') pet.wake()
+    else if (intent === 'acknowledge') pet.acknowledge()
+    else pet.command(intent as ActionId)
   }
 
   destroy(): void {
     this.running = false
     if (this.timerHandle) clearTimeout(this.timerHandle)
     cancelAnimationFrame(this.rafHandle)
-    this.app.destroy(true, { children: true })
+    window.removeEventListener('resize', this.resize)
   }
 
-  private frame(onState: (state: StageState) => void): void {
+  private frame(): void {
     const now = performance.now()
-    // Clamped so a stalled renderer or a sleeping laptop cannot teleport the pet
+    // Clamped so a stalled renderer or a sleeping laptop cannot teleport a pet
     // across the screen on the next frame.
     const dt = Math.min(0.1, (now - this.lastFrame) / 1000)
     this.lastFrame = now
 
-    this.pet.update(dt, this.desktop)
-
-    // Landing kicks the squash spring; the impact reads as weight.
-    if (!this.wasGrounded && this.pet.grounded) this.cat.impact(Math.abs(this.pet.vy) + 320)
-    this.wasGrounded = this.pet.grounded
-
     const scale = this.settings.scale
-    const localX = this.pet.x - this.desktop.bounds.x
-    const localY = this.pet.y - this.desktop.bounds.y
+    const boundsReady = this.desktop.displays.length > 0
+    const pets = [...this.entries.values()].map((e) => e.pet)
 
-    // Move the viewport, not the sprite. Rounded to whole pixels so the pet does
-    // not shimmer from subpixel resampling as it walks.
-    const viewX = Math.round(localX - ANCHOR_X)
-    const viewY = Math.round(localY - ANCHOR_Y)
-    if (viewX !== this.lastViewX || viewY !== this.lastViewY) {
-      this.app.canvas.style.transform = `translate3d(${viewX}px, ${viewY}px, 0)`
-      this.lastViewX = viewX
-      this.lastViewY = viewY
+    // --- simulate every pet, then resolve any that walked off a display edge ---
+    const handoffs: number[] = []
+    for (const entry of this.entries.values()) {
+      if (entry.needsSpawn) {
+        if (!boundsReady) continue
+        const b = this.desktop.bounds
+        entry.pet.spawn(this.desktop, b.x + b.w * entry.spawnFraction)
+        entry.needsSpawn = false
+      }
+
+      const others = pets.filter((p) => p !== entry.pet)
+      const vyBefore = entry.pet.vy
+      entry.pet.update(dt, this.desktop, others)
+
+      // Landing kicks the squash spring; the impact reads as weight.
+      if (!entry.wasGrounded && entry.pet.grounded) entry.cat.impact(Math.abs(vyBefore) + 320)
+      entry.wasGrounded = entry.pet.grounded
+
+      // Advance the drawable pose here, before the clear pass, so the box that
+      // gets reserved matches the pose that will actually be drawn this frame —
+      // otherwise a pet that just started climbing clears an upright-sized box
+      // and its rotated sprite smears.
+      const anim = (window.pet.posePreview as AnimState) || entry.pet.anim
+      entry.cat.update(dt, anim, entry.pet.facing, entry.pet.vx, scale)
+
+      if (entry.pet.grounded && boundsReady) {
+        const b = this.desktop.bounds
+        if (entry.pet.x < b.x - 2 || entry.pet.x >= b.x + b.w + 2) {
+          const target = this.desktop.displayContaining(entry.pet.x, entry.pet.y)
+          if (target && target.id !== this.displayId) {
+            window.pet.handoff({
+              id: entry.pet.id,
+              personality: entry.pet.personality,
+              seed: entry.pet.seed,
+              live: entry.pet.serialize(),
+            })
+            handoffs.push(entry.pet.id)
+          }
+        }
+      }
     }
+    for (const id of handoffs) this.removePet(id)
 
-    this.cat.update(dt, this.pet.anim, this.pet.facing, this.pet.vx, scale)
+    // --- clear each pet's old and new footprint, then draw them all ---
+    for (const entry of this.entries.values()) {
+      if (entry.needsSpawn) continue
+      const box = this.boxFor(entry, scale)
+      if (entry.lastBox) this.clearBox(entry.lastBox)
+      this.clearBox(box)
+      entry.lastBox = box
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.needsSpawn) continue
+      const pet = entry.pet
+      // Pose was already advanced in the simulate pass above; just draw it.
+      const localX = Math.round(pet.x - this.desktop.bounds.x)
+      const localY = Math.round(pet.y - this.desktop.bounds.y)
+      this.ctx.save()
+      this.ctx.translate(localX, localY)
+      entry.cat.draw(this.ctx)
+      this.ctx.restore()
+    }
 
     this.updateHitTest(scale)
     this.throttle()
     this.debugStats(now)
+    this.reportActive(scale)
+  }
 
-    onState({
-      screenX: localX,
-      screenY: localY - PET_HEIGHT * scale,
-      mood: this.pet.mood,
-      action: this.pet.action,
-      hovered: this.hovered,
-      standingOn: this.pet.surface?.app ?? null,
+  /** Window-local, padded bounding box for a pet's sprite this frame. */
+  private boxFor(entry: Entry, scale: number): { left: number; top: number; width: number; height: number } {
+    const b = entry.cat.boundsFor(scale)
+    const localX = Math.round(entry.pet.x - this.desktop.bounds.x)
+    const localY = Math.round(entry.pet.y - this.desktop.bounds.y)
+    return {
+      left: Math.floor(localX + b.left) - 2,
+      top: Math.floor(localY + b.top) - 2,
+      width: Math.ceil(b.width) + 4,
+      height: Math.ceil(b.height) + 4,
+    }
+  }
+
+  private clearBox(box: { left: number; top: number; width: number; height: number }): void {
+    this.ctx.clearRect(box.left, box.top, box.width, box.height)
+  }
+
+  private reportActive(scale: number): void {
+    if (this.activePetId === null) {
+      this.onState(null)
+      return
+    }
+    const entry = this.entries.get(this.activePetId)
+    if (!entry) {
+      this.onState(null)
+      return
+    }
+    const pet = entry.pet
+    this.onState({
+      petId: pet.id,
+      screenX: pet.x - this.desktop.bounds.x,
+      screenY: pet.y - this.desktop.bounds.y - PET_HEIGHT * scale,
+      mood: pet.mood,
+      action: pet.action,
+      hovered: this.hoveredPetId === pet.id,
+      standingOn: pet.surface?.app ?? null,
     })
   }
 
   /**
-   * Toggle the window between click-through and solid based on whether the
-   * cursor is over the pet. Only sends IPC on a change — this runs every frame.
+   * Toggle the window between click-through and solid based on whether the cursor
+   * is over any pet, and remember which pet that is for click routing. Only sends
+   * IPC on a change — this runs every frame.
    */
   private updateHitTest(scale: number): void {
     const halfWidth = PET_HEIGHT * 0.45 * scale + HIT_PADDING
     const height = PET_HEIGHT * scale + HIT_PADDING
-
     const { x: cx, y: cy } = this.desktop.cursor
-    const over =
-      cx >= this.pet.x - halfWidth &&
-      cx <= this.pet.x + halfWidth &&
-      cy >= this.pet.y - height &&
-      cy <= this.pet.y + HIT_PADDING
 
-    this.hovered = over
-    const want = over || this.forceInteractive
+    let hit: number | null = null
+    let bestDist = Infinity
+    for (const entry of this.entries.values()) {
+      const pet = entry.pet
+      const over =
+        cx >= pet.x - halfWidth &&
+        cx <= pet.x + halfWidth &&
+        cy >= pet.y - height &&
+        cy <= pet.y + HIT_PADDING
+      if (!over) continue
+      const d = Math.abs(cx - pet.x)
+      if (d < bestDist) {
+        bestDist = d
+        hit = pet.id
+      }
+    }
+
+    this.hoveredPetId = hit
+    this.hovered = hit !== null
+    const want = this.hovered || this.forceInteractive
     if (want === this.interactive) return
     this.interactive = want
     window.pet.setInteractive(want)
   }
 
-  /**
-   * Reports the frame rate actually achieved alongside the cap we asked for, so
-   * a throttle that silently fails to engage is visible. Enabled with PET_DEBUG.
-   */
   private debugStats(now: number): void {
     if (!window.pet.debug) return
     this.debugFrames++
     if (now - this.debugSince < 5000) return
     const fps = (this.debugFrames * 1000) / (now - this.debugSince)
     console.log(
-      `[stats] fps=${fps.toFixed(1)} cap=${this.targetFps} anim=${this.pet.anim} ` +
-        `asleep=${this.pet.asleep} idle=${this.desktop.idleSeconds}s windows=${this.desktop.windows.length}`,
+      `[stats] fps=${fps.toFixed(1)} cap=${this.targetFps} display=${this.displayId} ` +
+        `pets=${this.entries.size} windows=${this.desktop.windows.length}`,
     )
     this.debugFrames = 0
     this.debugSince = now
   }
 
   /**
-   * Drop the frame rate when nothing is moving. A sleeping pet on an idle
-   * machine should cost close to nothing; this is most of why the app can sit
-   * in the background all day.
+   * Drop the frame rate when nothing is moving. A screen of sleeping pets on an
+   * idle machine should cost close to nothing. The rate is the liveliest pet's
+   * need, so one running cat lifts the whole display while the rest doze.
    */
   private throttle(): void {
-    // What matters is whether anything is actually *moving*, not which action is
-    // running. The pet spends most of its life in sit/idle/look, where the only
-    // motion is breathing and the occasional blink — those read perfectly well
-    // at a third of the frame rate, and this is the common case all day.
-    const moving = Math.abs(this.pet.vx) > 0.5 || !this.pet.grounded
-    const lively =
-      moving ||
-      this.pet.anim === 'dance' ||
-      this.pet.anim === 'celebrate' ||
-      this.pet.anim === 'scratch' ||
-      this.pet.anim === 'stretch'
+    let anyLively = false
+    let allAsleep = this.entries.size > 0
+    for (const { pet } of this.entries.values()) {
+      const moving = Math.abs(pet.vx) > 0.5 || !pet.grounded
+      const lively =
+        moving ||
+        pet.anim === 'dance' ||
+        pet.anim === 'celebrate' ||
+        pet.anim === 'scratch' ||
+        pet.anim === 'stretch'
+      if (lively) anyLively = true
+      if (!pet.asleep) allAsleep = false
+    }
     const userAway = this.desktop.idleSeconds > 30
 
-    // settings.fps is a ceiling, never a floor — every rule below may only take
-    // the rate down.
+    // settings.fps is a ceiling, never a floor — every rule below may only lower it.
     let fps = this.settings.fps
-    if (this.pet.asleep) fps = Math.min(fps, userAway ? 4 : 8)
-    else if (!lively) fps = Math.min(fps, userAway ? 8 : 12)
+    if (allAsleep) fps = Math.min(fps, userAway ? 4 : 8)
+    else if (!anyLively) fps = Math.min(fps, userAway ? 8 : 12)
     if (this.desktop.onBattery) fps = Math.min(fps, 24)
 
     this.targetFps = Math.max(1, fps)

@@ -34,6 +34,9 @@ export type ActionId =
   | 'watch'
   | 'celebrate'
   | 'scratch'
+  | 'follow'
+  | 'play'
+  | 'climb'
 
 export interface ActionContext {
   needs: Needs
@@ -45,10 +48,18 @@ export interface ActionContext {
   hour: number
   /** Ledges the pet could plausibly jump to right now. */
   ledgeCount: number
+  /** Window edges the pet could scale to a top edge out of jump range. */
+  wallCount: number
   /** True when the pet is standing on an application window rather than the floor. */
   onWindow: boolean
   asleep: boolean
   onBattery: boolean
+  /** Other pets sharing this display; 0 means the pet is on its own. */
+  petCount: number
+  /** Distance in points to the nearest other pet; Infinity when alone. */
+  nearestPetDistance: number
+  /** Whether that nearest pet is currently asleep, for pile-sleeping. */
+  nearestPetSleeping: boolean
 }
 
 export interface ActionDef {
@@ -198,6 +209,53 @@ export const ACTIONS: ActionDef[] = [
     minDuration: 1.8,
     maxDuration: 3.2,
     cooldown: 35,
+  },
+  {
+    id: 'follow',
+    // Trailing another pet across the desktop. Wants company and a companion far
+    // enough away to be worth walking to; a sociable pet gravitates hard.
+    score: (c) => {
+      if (c.petCount === 0 || c.nearestPetDistance > 650) return 0
+      // Already snuggled up — no need to keep closing the gap.
+      if (c.nearestPetDistance < 70) return 0
+      const proximity = 1 - Math.min(1, c.nearestPetDistance / 650)
+      return (c.needs.loneliness * 0.4 + c.traits.sociability * 30) * proximity - c.needs.sleepiness * 0.2
+    },
+    minDuration: 2.5,
+    maxDuration: 7,
+    cooldown: 8,
+  },
+  {
+    id: 'play',
+    // Two pets close together with energy to burn tumble about. Reads as the
+    // pair actually interacting rather than just standing near each other.
+    score: (c) => {
+      if (c.petCount === 0 || c.nearestPetDistance > 170 || c.nearestPetSleeping) return 0
+      return n(c.needs.excitement - 25) * 0.6 + c.traits.energy * 20 + c.traits.mischief * 12 + c.traits.sociability * 8
+    },
+    minDuration: 2,
+    maxDuration: 4.5,
+    cooldown: 12,
+  },
+  {
+    id: 'climb',
+    // Scaling the side of a tall window to reach a title bar it could never jump
+    // to. Personality-gated: a bold, energetic cat scales walls readily; a timid
+    // one stays on the floor and only takes the low jumps. Needs a wall to climb.
+    score: (c) => {
+      if (c.wallCount === 0) return 0
+      return (
+        c.traits.boldness * 34 +
+        c.traits.energy * 12 +
+        c.needs.curiosity * 0.25 -
+        c.needs.sleepiness * 0.3 -
+        (c.onBattery ? 8 : 0)
+      )
+    },
+    // Long enough to walk to the wall and make the ascent before reconsidering.
+    minDuration: 5,
+    maxDuration: 14,
+    cooldown: 16,
   },
 ]
 

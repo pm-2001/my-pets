@@ -8,21 +8,28 @@ import type { PetMemory, Settings } from '../src/shared/types'
  * a few kilobytes, and avoiding a native module keeps the build to a plain
  * `npm install` with no node-gyp toolchain.
  *
- * Writes go through a temp file + rename so a crash mid-save cannot leave the
- * pet's memory truncated.
+ * Writes go through a temp file + rename so a crash mid-save cannot leave a pet's
+ * memory truncated. Main is the single writer — every renderer routes memory
+ * changes through it — so there is no multi-window race over the file even with
+ * one overlay per display.
+ *
+ * The on-disk shape is `{ pets: PetMemory[] }`. A pre-multi-pet file was a bare
+ * PetMemory object; it is migrated transparently on load.
  */
 
 const MAX_CHAT_HISTORY = 60
+const PERSONALITIES = ['lazy', 'energetic', 'curious', 'mischievous', 'friendly', 'shy', 'brave']
+const NAMES = ['Mochi', 'Biscuit', 'Pixel', 'Sol', 'Ziggy', 'Clover', 'Miso', 'Pesto']
 
 function pathFor(file: string): string {
   return join(app.getPath('userData'), file)
 }
 
-function readJson<T>(file: string, fallback: T): T {
+function readRaw(file: string): unknown {
   try {
-    return { ...fallback, ...(JSON.parse(readFileSync(pathFor(file), 'utf8')) as object) } as T
+    return JSON.parse(readFileSync(pathFor(file), 'utf8'))
   } catch {
-    return fallback
+    return null
   }
 }
 
@@ -34,12 +41,10 @@ function writeJson(file: string, value: unknown): void {
   renameSync(temp, target)
 }
 
-const PERSONALITIES = ['lazy', 'energetic', 'curious', 'mischievous', 'friendly', 'shy', 'brave']
-
-function freshMemory(): PetMemory {
+export function freshMemory(index = 0): PetMemory {
   const seed = Math.floor(Math.random() * 2 ** 31)
   return {
-    name: 'Mochi',
+    name: NAMES[(seed + index) % NAMES.length]!,
     seed,
     // Derived from the seed so a given pet's nature is stable forever.
     personality: PERSONALITIES[seed % PERSONALITIES.length]!,
@@ -47,6 +52,7 @@ function freshMemory(): PetMemory {
     aliveSeconds: 0,
     petCount: 0,
     appSeconds: {},
+    appByHour: {},
     userName: null,
     lastSeenAt: Date.now(),
     chat: [],
@@ -54,39 +60,49 @@ function freshMemory(): PetMemory {
   }
 }
 
+/** Backfill any fields a memory written by an older version is missing. */
+function hydrate(raw: Partial<PetMemory>): PetMemory {
+  return { ...freshMemory(), ...raw, appByHour: raw.appByHour ?? {} }
+}
+
+function trim(memory: PetMemory): PetMemory {
+  return {
+    ...memory,
+    // Bound history so a long-lived pet cannot grow its file without limit.
+    chat: memory.chat.slice(-MAX_CHAT_HISTORY),
+    notes: memory.notes.slice(-40),
+    lastSeenAt: Date.now(),
+  }
+}
+
 const DEFAULT_SETTINGS: Settings = {
   scale: 1,
   fps: 30,
   useWindows: true,
+  pets: 1,
   aiChat: false,
   aiModel: 'claude-opus-5',
 }
 
 export const store = {
-  loadMemory(): PetMemory {
-    return readJson<PetMemory>('memory.json', freshMemory())
-  },
-
-  saveMemory(memory: PetMemory): void {
-    // Bound the history so a long-lived pet cannot grow its file without limit.
-    const trimmed: PetMemory = {
-      ...memory,
-      chat: memory.chat.slice(-MAX_CHAT_HISTORY),
-      notes: memory.notes.slice(-40),
-      lastSeenAt: Date.now(),
+  loadPets(): PetMemory[] {
+    const raw = readRaw('memory.json')
+    if (raw && typeof raw === 'object' && Array.isArray((raw as { pets?: unknown }).pets)) {
+      const pets = (raw as { pets: Partial<PetMemory>[] }).pets.map(hydrate)
+      return pets.length ? pets : [freshMemory()]
     }
-    writeJson('memory.json', trimmed)
+    // Legacy single-pet file: wrap it as the first pet.
+    if (raw && typeof raw === 'object') return [hydrate(raw as Partial<PetMemory>)]
+    return [freshMemory()]
   },
 
-  /** Wipe the pet: a new personality, a new name, no history. */
-  resetMemory(): PetMemory {
-    const born = freshMemory()
-    writeJson('memory.json', born)
-    return born
+  savePets(pets: PetMemory[]): void {
+    writeJson('memory.json', { pets: pets.map(trim) })
   },
 
   loadSettings(): Settings {
-    return readJson<Settings>('settings.json', DEFAULT_SETTINGS)
+    const raw = readRaw('settings.json')
+    return { ...DEFAULT_SETTINGS, ...(raw && typeof raw === 'object' ? raw : {}) }
   },
 
   saveSettings(settings: Settings): void {

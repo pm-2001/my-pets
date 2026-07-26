@@ -1,4 +1,4 @@
-import type { DesktopWindow, Rect, WorldEnv, WorldPulse } from '@shared/types'
+import type { DesktopWindow, DisplayInfo, Rect, WorldEnv, WorldPulse } from '@shared/types'
 
 /**
  * The desktop, modelled as a platformer level.
@@ -8,6 +8,12 @@ import type { DesktopWindow, Rect, WorldEnv, WorldPulse } from '@shared/types'
  * matters: a ledge belonging to a window that is buried behind another is not
  * standable where it is covered, otherwise the pet appears to stand on thin air
  * in front of whatever is actually on top.
+ *
+ * One `Desktop` exists per overlay window, each pinned to a single display via
+ * `setDisplay`. Its floor and walls come from *that* display's geometry, but the
+ * window list is global, so a pet can still stand on a window that straddles two
+ * screens. Where a neighbouring display abuts an edge, that edge is a soft wall:
+ * the pet may walk off it and the stage hands it to the neighbour.
  */
 
 export interface Surface {
@@ -18,28 +24,66 @@ export interface Surface {
   app: string | null
 }
 
+/** A window's vertical edge the pet can scale to reach a top edge out of jump range. */
+export interface Wall {
+  /** X of the wall itself (a window's left or right edge). */
+  edgeX: number
+  /** Y of the top edge the climb arrives at. */
+  topY: number
+  /** -1 for the window's left edge, +1 for its right edge. */
+  side: -1 | 1
+  /** Where the pet stands, just outside the wall, before it starts climbing. */
+  approachX: number
+  /** Where the pet steps to on the top edge once it has mounted. */
+  mountX: number
+  /** Which way the pet faces while climbing: +1 when the wall is on its right. */
+  climbFacing: 1 | -1
+  /** The top edge, as a standable surface, for after the mount. */
+  surface: Surface
+}
+
+/** The tallest single hop, shared by jump-reachability and climb-necessity checks. */
+const JUMP_REACH = 260
+/** The tallest wall worth attempting; beyond this a climb reads as a stunt. */
+const CLIMB_CEILING = 1200
+
 const EMPTY_RECT: Rect = { x: 0, y: 0, w: 1440, h: 900 }
 
 export class Desktop {
   windows: DesktopWindow[] = []
+  displays: DisplayInfo[] = []
   cursor = { x: 0, y: 0 }
   idleSeconds = 0
   onBattery = false
   batteryLevel: number | null = null
   hour = 12
-  /** Full display rect — the overlay window's own geometry. */
+  /** This window's display rect — the overlay window's own geometry. */
   bounds: Rect = EMPTY_RECT
   /** Excludes menu bar and dock; the pet's floor and ceiling come from this. */
   workArea: Rect = EMPTY_RECT
   useWindows = true
 
+  /** Which display this overlay belongs to; -1 until main assigns one. */
+  private displayId = -1
+
+  /** Pin this desktop to a display id. Bounds refresh on the next env. */
+  setDisplay(id: number): void {
+    this.displayId = id
+    this.applyDisplay()
+  }
+
   updateEnv(env: WorldEnv): void {
     this.windows = env.windows
+    this.displays = env.displays
     this.onBattery = env.onBattery
     this.batteryLevel = env.batteryLevel
     this.hour = env.hour
+    this.applyDisplay()
+  }
 
-    const display = env.displays[0]
+  private applyDisplay(): void {
+    const display =
+      this.displays.find((d) => d.id === this.displayId) ?? this.displays[0]
     if (display) {
       this.bounds = display.bounds
       this.workArea = display.workArea
@@ -66,6 +110,35 @@ export class Desktop {
   /** The app whose window is frontmost, used for the pet's daily-routine memory. */
   get frontApp(): string | null {
     return this.windows[0]?.app ?? null
+  }
+
+  /**
+   * Whether another display abuts this one on a given side at height `y`. A pet
+   * reaching that edge is handed across rather than turned back; with no
+   * neighbour the edge is a hard wall so the pet never wanders out of view.
+   */
+  hasNeighbour(side: -1 | 1, y: number): boolean {
+    return this.neighbourAt(side, y) !== null
+  }
+
+  private neighbourAt(side: -1 | 1, y: number): DisplayInfo | null {
+    for (const d of this.displays) {
+      if (d.id === this.displayId) continue
+      const abuts = side < 0 ? d.bounds.x < this.bounds.x : d.bounds.x >= this.rightEdge - 1
+      const overlapsY = y >= d.bounds.y && y <= d.bounds.y + d.bounds.h
+      if (abuts && overlapsY) return d
+    }
+    return null
+  }
+
+  /** The display whose bounds contain a global point, if any. Handoff target. */
+  displayContaining(x: number, y: number): DisplayInfo | null {
+    for (const d of this.displays) {
+      if (x >= d.bounds.x && x < d.bounds.x + d.bounds.w && y >= d.bounds.y && y < d.bounds.y + d.bounds.h) {
+        return d
+      }
+    }
+    return null
   }
 
   /**
@@ -118,11 +191,55 @@ export class Desktop {
     for (let i = 0; i < this.windows.length; i++) {
       const w = this.windows[i]!
       if (w.y >= y - 20) continue // not meaningfully higher than we already are
-      if (y - w.y > 260) continue // too tall to jump
+      if (y - w.y > JUMP_REACH) continue // too tall to jump
       const nearestX = Math.max(w.x, Math.min(x, w.x + w.w))
       if (Math.abs(nearestX - x) > reach) continue
       if (this.occluded(i, nearestX, w.y)) continue
       out.push({ y: w.y, x1: w.x, x2: w.x + w.w, app: w.app })
+    }
+    return out
+  }
+
+  /**
+   * Vertical window edges the pet could scale to reach a top edge that is too
+   * high to jump to. A wall qualifies when its top is above jump range but not
+   * absurdly high, its side reaches down to about the pet's feet (so there is a
+   * continuous surface to grip), and the top it leads to is not buried behind a
+   * window in front. Used by the climb behaviour.
+   */
+  climbableWalls(x: number, y: number, reach = 640): Wall[] {
+    if (!this.useWindows) return []
+    const out: Wall[] = []
+    for (let i = 0; i < this.windows.length; i++) {
+      const w = this.windows[i]!
+      const top = w.y
+      const bottom = w.y + w.h
+      const rise = y - top
+      if (rise <= JUMP_REACH || rise > CLIMB_CEILING) continue // jumpable, or too tall
+      if (bottom < y - 60) continue // the side does not reach down near the pet's feet
+      if (top >= this.floorY) continue // sanity: it must actually be above the floor
+
+      for (const side of [-1, 1] as const) {
+        const edgeX = side < 0 ? w.x : w.x + w.w
+        if (Math.abs(edgeX - x) > reach) continue
+        const mountProbe = side < 0 ? w.x + 12 : w.x + w.w - 12
+        // The edge must be exposed in front, not buried behind another window —
+        // otherwise the pet appears to climb *through* whatever is on top of it.
+        // Sample down the upper stretch of the edge and reject if any point is
+        // covered by a window stacked in front.
+        const reachDown = Math.min(bottom, y) - top
+        const probeYs = [top, top + reachDown * 0.2, top + reachDown * 0.45]
+        if (probeYs.some((py) => this.occluded(i, mountProbe, py))) continue
+        out.push({
+          edgeX,
+          topY: top,
+          side,
+          approachX: side < 0 ? w.x - 6 : w.x + w.w + 6,
+          mountX: mountProbe,
+          climbFacing: side < 0 ? 1 : -1,
+          surface: { y: top, x1: w.x, x2: w.x + w.w, app: w.app },
+        })
+      }
     }
     return out
   }

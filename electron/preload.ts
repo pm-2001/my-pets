@@ -1,10 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { PetBridge, PetMemory, Settings, WorldEnv, WorldPulse } from '../src/shared/types'
+import type { PetAssignment, PetBridge, PetSpawn, Settings, WorldEnv, WorldPulse } from '../src/shared/types'
 
 /**
  * The only surface the renderer gets. Node integration is off and context
  * isolation is on, so everything the pet can do to the machine passes through
- * this list.
+ * this list. Memory now lives in main, so the renderer can no longer read or
+ * write it directly — it only asks main to record interactions.
  */
 const bridge: PetBridge = {
   onEnv(cb) {
@@ -17,6 +18,18 @@ const bridge: PetBridge = {
     const listener = (_event: unknown, pulse: WorldPulse) => cb(pulse)
     ipcRenderer.on('world:pulse', listener)
     return () => ipcRenderer.removeListener('world:pulse', listener)
+  },
+
+  onAssign(cb) {
+    const listener = (_event: unknown, assignment: PetAssignment) => cb(assignment)
+    ipcRenderer.on('pet:assign', listener)
+    return () => ipcRenderer.removeListener('pet:assign', listener)
+  },
+
+  onReceive(cb) {
+    const listener = (_event: unknown, spawn: PetSpawn) => cb(spawn)
+    ipcRenderer.on('pet:receive', listener)
+    return () => ipcRenderer.removeListener('pet:receive', listener)
   },
 
   onPoke(cb) {
@@ -45,13 +58,21 @@ const bridge: PetBridge = {
     ipcRenderer.send('pet:chat-focus', focused)
   },
 
-  loadMemory: () => ipcRenderer.invoke('memory:load') as Promise<PetMemory>,
-  saveMemory: (memory) => ipcRenderer.send('memory:save', memory),
+  handoff(spawn) {
+    ipcRenderer.send('pet:handoff', spawn)
+  },
+
+  poked(petId) {
+    ipcRenderer.send('pet:poked', petId)
+  },
+
   loadSettings: () => ipcRenderer.invoke('settings:load') as Promise<Settings>,
-  saveSettings: (settings) => ipcRenderer.send('settings:save', settings),
-  chat: (prompt, memory) => ipcRenderer.invoke('pet:chat', prompt, memory) as Promise<string>,
+  loadAssignment: () => ipcRenderer.invoke('assign:load') as Promise<PetAssignment>,
+  loadEnv: () => ipcRenderer.invoke('env:load') as Promise<WorldEnv | null>,
+  chat: (petId, prompt) => ipcRenderer.invoke('pet:chat', petId, prompt) as Promise<string>,
   quit: () => ipcRenderer.send('pet:quit'),
   debug: process.env.PET_DEBUG === '1',
+  posePreview: process.env.PET_POSE ?? null,
 }
 
 contextBridge.exposeInMainWorld('pet', bridge)

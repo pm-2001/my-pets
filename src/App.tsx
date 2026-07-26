@@ -1,32 +1,116 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PetMemory, Settings } from '@shared/types'
+import type { Settings } from '@shared/types'
 import { Stage, type StageState } from './render/stage'
 import { Bubble } from './ui/Bubble'
 import './ui/ui.css'
 
 /**
- * Glue: owns the pet's long-term memory, drives the stage, and renders the DOM
- * layer on top of the canvas.
+ * Glue: drives the stage for this window's display and renders the DOM speech
+ * bubble on top of the canvas.
  *
- * The simulation deliberately does not live in React state — it runs at 30fps
- * inside the Pixi ticker, and re-rendering a component tree that often would
- * dwarf the cost of the pet itself. React only sees a small summary each frame.
+ * Long-term memory no longer lives here — main owns it, so this component is
+ * almost entirely about the one pet a bubble is currently attached to. The
+ * simulation runs at up to 30fps inside the stage's own loop; React only sees a
+ * small per-frame summary, and only while a bubble is actually open.
  */
 
-const MEMORY_TICK_MS = 5000
-const SAVE_EVERY_TICKS = 4
+/**
+ * Turn something the user typed into a command the pet can act on. Matched on
+ * simple keywords so it works with the local voice and without a network round
+ * trip — the point is that saying "jump" makes the cat jump, right now. Returns
+ * the stage intent plus a short in-character acknowledgement, or null when the
+ * message is just conversation.
+ */
+const COMMANDS: [RegExp, string, string][] = [
+  [/\b(jump|hop|leap|boing)\b/, 'hop', '*boing!*'],
+  [/\b(come|here|follow me|to me)\b/, 'chase', 'coming!'],
+  [/\b(wake|get up|wake up)\b/, 'wake', '*perks up*'],
+  [/\b(sleep|nap|goodnight|good night|bed|bedtime)\b/, 'sleep', '*curls up* zzz…'],
+  [/\b(sit|sit down)\b/, 'sit', '*sits*'],
+  [/\b(dance|boogie)\b/, 'dance', '*busts a move*'],
+  [/\b(run|zoom|zoomies|sprint)\b/, 'run', '*zoomies!*'],
+  [/\b(climb|scale)\b/, 'climb', '*finds a wall to climb*'],
+  [/\b(explore|adventure|windows)\b/, 'explore', '*off exploring*'],
+  [/\b(stretch)\b/, 'stretch', '*big stretch*'],
+  [/\b(play|celebrate|party|yay)\b/, 'celebrate', 'yay!'],
+  [/\b(scratch)\b/, 'scratch', '*scratch scratch*'],
+  [/\b(look|watch|scan)\b/, 'lookAround', '*looks around*'],
+  [/\b(walk|wander|stroll)\b/, 'walk', '*wanders off*'],
+  [/\b(stop|stay|chill|relax|rest|calm)\b/, 'idle', '*settles down*'],
+]
+
+function parseIntent(text: string): { intent: string; ack: string } | null {
+  const t = text.toLowerCase()
+  for (const [re, intent, ack] of COMMANDS) if (re.test(t)) return { intent, ack }
+  return null
+}
 
 export function App() {
   const mountRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<Stage | null>(null)
-  const memoryRef = useRef<PetMemory | null>(null)
   const stateRef = useRef<StageState | null>(null)
-
-  const [ready, setReady] = useState(false)
-  const [petState, setPetState] = useState<StageState | null>(null)
-  const [bubble, setBubble] = useState<{ text: string; thinking: boolean } | null>(null)
+  /** The pet a bubble is currently attached to, read by callbacks. */
+  const activePetRef = useRef<number | null>(null)
   /** Mirrors `bubble` for the render callback, which closes over stale state. */
   const bubbleOpenRef = useRef(false)
+
+  const [petState, setPetState] = useState<StageState | null>(null)
+  const [bubble, setBubble] = useState<{ text: string; thinking: boolean } | null>(null)
+
+  const say = useCallback(async (petId: number, prompt: string) => {
+    // A recognised command makes the cat act immediately, with a snappy ack and
+    // no network round trip.
+    const command = parseIntent(prompt)
+    if (command) {
+      stageRef.current?.command(petId, command.intent)
+      setBubble({ text: command.ack, thinking: false })
+      return
+    }
+
+    // Otherwise it perks up and answers in words.
+    stageRef.current?.command(petId, 'acknowledge')
+    setBubble({ text: '', thinking: true })
+    const reply = await window.pet.chat(petId, prompt)
+    // A different pet may have been clicked while we waited; ignore stale replies.
+    if (activePetRef.current !== petId) return
+    setBubble({ text: reply, thinking: false })
+  }, [])
+
+  const closeBubble = useCallback(() => {
+    const stage = stageRef.current
+    stage?.setForceInteractive(false)
+    stage?.setActivePet(null)
+    window.pet.setChatFocus(false)
+    bubbleOpenRef.current = false
+    activePetRef.current = null
+    setBubble(null)
+  }, [])
+
+  const openBubbleFor = useCallback(
+    (petId: number) => {
+      const stage = stageRef.current
+      if (!stage) return
+
+      // Clicking the pet whose bubble is already open closes it; clicking a
+      // different pet switches the bubble across to that one.
+      if (bubbleOpenRef.current && activePetRef.current === petId) {
+        closeBubble()
+        return
+      }
+
+      stage.poke(petId)
+      window.pet.poked(petId)
+      stage.setActivePet(petId)
+      activePetRef.current = petId
+      stage.setForceInteractive(true)
+      window.pet.setChatFocus(true)
+      bubbleOpenRef.current = true
+      if (stateRef.current) setPetState(stateRef.current)
+      setBubble({ text: '', thinking: true })
+      void say(petId, '*pets you on the head*')
+    },
+    [closeBubble, say],
+  )
 
   // --- boot ---------------------------------------------------------------
   useEffect(() => {
@@ -34,28 +118,30 @@ export function App() {
     let stage: Stage | null = null
 
     void (async () => {
-      const [memory, settings] = await Promise.all([
-        window.pet.loadMemory(),
-        window.pet.loadSettings(),
-      ])
+      const settings = await window.pet.loadSettings()
       if (disposed || !mountRef.current) return
 
-      memoryRef.current = memory
-      stage = new Stage(memory, settings)
+      stage = new Stage(settings)
       stageRef.current = stage
 
       await stage.init(
         mountRef.current,
         (next) => {
           stateRef.current = next
-          // Only push into React when something is actually rendering it.
-          // Otherwise this would re-render the tree at the frame rate to feed a
-          // component that is not mounted.
+          // Only push into React when a bubble is actually rendering it; otherwise
+          // this would re-render the tree at the frame rate to feed nothing.
           if (bubbleOpenRef.current) setPetState(next)
         },
-        () => handlePetClick(),
+        (petId) => openBubbleFor(petId),
       )
-      setReady(true)
+
+      // Pull the opening world snapshot and assignment rather than waiting on a
+      // pushed event, which a freshly-mounted window can miss. Live updates still
+      // arrive via the event listeners below.
+      const [env, assignment] = await Promise.all([window.pet.loadEnv(), window.pet.loadAssignment()])
+      if (disposed) return
+      if (env) stage.applyEnv(env)
+      stage.applyAssignment(assignment)
     })()
 
     return () => {
@@ -63,7 +149,7 @@ export function App() {
       stage?.destroy()
       stageRef.current = null
     }
-    // Boot exactly once; handlePetClick reads through refs so it needs no deps.
+    // Boot exactly once; callbacks read through refs so they need no deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -71,113 +157,35 @@ export function App() {
   useEffect(() => {
     const offEnv = window.pet.onEnv((env) => stageRef.current?.applyEnv(env))
     const offPulse = window.pet.onPulse((pulse) => stageRef.current?.applyPulse(pulse))
-    const offPoke = window.pet.onPoke(() => handlePetClick())
-    const offSettings = window.pet.onSettings((settings: Settings) =>
-      stageRef.current?.setSettings(settings),
-    )
-    // A reset changes personality, palette and traits — rebuilding the whole
-    // renderer is both simpler and more correct than patching them in place.
+    const offAssign = window.pet.onAssign((a) => stageRef.current?.applyAssignment(a))
+    const offReceive = window.pet.onReceive((spawn) => stageRef.current?.receivePet(spawn))
+    const offSettings = window.pet.onSettings((settings: Settings) => stageRef.current?.setSettings(settings))
+    // Tray "Say hi": greet whichever pet is on this display.
+    const offPoke = window.pet.onPoke(() => {
+      const id = stageRef.current?.pokeAny()
+      if (id != null) openBubbleFor(id)
+    })
+    // A reset changes personalities, palettes and traits — a full reload is both
+    // simpler and more correct than patching every pet in place.
     const offReset = window.pet.onReset(() => window.location.reload())
 
     return () => {
       offEnv()
       offPulse()
-      offPoke()
+      offAssign()
+      offReceive()
       offSettings()
+      offPoke()
       offReset()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // --- long-term memory ----------------------------------------------------
-  useEffect(() => {
-    if (!ready) return
-    let ticks = 0
-
-    const timer = setInterval(() => {
-      const memory = memoryRef.current
-      const stage = stageRef.current
-      if (!memory || !stage) return
-
-      const seconds = MEMORY_TICK_MS / 1000
-      memory.aliveSeconds += seconds
-
-      // Attribute time to whatever the user actually had in front of them, so
-      // the pet slowly learns which app is "theirs".
-      const front = stage.desktop.frontApp
-      if (front && stage.desktop.idleSeconds < 60) {
-        memory.appSeconds[front] = (memory.appSeconds[front] ?? 0) + seconds
-      }
-
-      if (++ticks % SAVE_EVERY_TICKS === 0) window.pet.saveMemory(memory)
-    }, MEMORY_TICK_MS)
-
-    // Never lose the session's memories to a quit.
-    const flush = () => memoryRef.current && window.pet.saveMemory(memoryRef.current)
-    window.addEventListener('beforeunload', flush)
-
-    return () => {
-      clearInterval(timer)
-      window.removeEventListener('beforeunload', flush)
-      flush()
-    }
-  }, [ready])
-
-  // --- interaction ---------------------------------------------------------
-  const say = useCallback(async (prompt: string) => {
-    const memory = memoryRef.current
-    if (!memory) return
-
-    setBubble({ text: '', thinking: true })
-    const reply = await window.pet.chat(prompt, memory)
-
-    memory.chat.push({ role: 'user', text: prompt, at: Date.now() })
-    memory.chat.push({ role: 'pet', text: reply, at: Date.now() })
-    window.pet.saveMemory(memory)
-
-    setBubble({ text: reply, thinking: false })
-  }, [])
-
-  const handlePetClick = useCallback(() => {
-    const memory = memoryRef.current
-    const stage = stageRef.current
-    if (!memory || !stage) return
-
-    stage.poke()
-    memory.petCount += 1
-
-    // Clicking an already-open bubble closes it; otherwise the pet greets you.
-    setBubble((current) => {
-      if (current) {
-        stage.setForceInteractive(false)
-        window.pet.setChatFocus(false)
-        bubbleOpenRef.current = false
-        return null
-      }
-      stage.setForceInteractive(true)
-      window.pet.setChatFocus(true)
-      bubbleOpenRef.current = true
-      // Seed React with the current position so the bubble has somewhere to go
-      // on its very first render.
-      if (stateRef.current) setPetState(stateRef.current)
-      void say('*pets you on the head*')
-      return { text: '', thinking: true }
-    })
-  }, [say])
-
-  const closeBubble = useCallback(() => {
-    stageRef.current?.setForceInteractive(false)
-    window.pet.setChatFocus(false)
-    bubbleOpenRef.current = false
-    setBubble(null)
-  }, [])
+  }, [openBubbleFor])
 
   return (
     <>
       <div ref={mountRef} className="stage" />
-      {/* While the bubble is open the whole overlay is solid, so a click
-          anywhere else would otherwise be silently swallowed. Catching it to
-          dismiss makes that click mean something. */}
+      {/* While a bubble is open the whole overlay is solid, so a click anywhere
+          else would otherwise be silently swallowed. Catching it to dismiss
+          makes that click mean something. */}
       {bubble && <div className="scrim" onPointerDown={closeBubble} />}
       {bubble && petState && (
         <Bubble
@@ -185,7 +193,7 @@ export function App() {
           y={petState.screenY}
           text={bubble.text}
           thinking={bubble.thinking}
-          onSend={(message) => void say(message)}
+          onSend={(message) => activePetRef.current != null && void say(activePetRef.current, message)}
           onClose={closeBubble}
         />
       )}
