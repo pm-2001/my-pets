@@ -32,32 +32,67 @@ function resolveElectron() {
   }
 }
 
+// Where the electron package lives, or null if it is not installed at all.
+function electronDir() {
+  try {
+    return dirname(require.resolve('electron/package.json'))
+  } catch {
+    return null
+  }
+}
+
+// Which package manager, if any, is actually available — so recovery advice is
+// never "run npm" on a machine that has pnpm/yarn/bun instead, or no npm at all.
+function detectManager() {
+  const ua = process.env.npm_config_user_agent || ''
+  for (const name of ['pnpm', 'yarn', 'bun', 'npm']) if (ua.startsWith(name)) return name
+  for (const name of ['npm', 'pnpm', 'yarn', 'bun']) {
+    try {
+      if (spawnSync(name, ['--version'], { stdio: 'ignore' }).status === 0) return name
+    } catch {
+      // not on PATH — keep looking
+    }
+  }
+  return null
+}
+
 let electron = resolveElectron()
 
-// Some machines block package install scripts for security, which leaves
-// Electron's binary un-downloaded. We are a user-invoked command, not an install
-// hook, so we can finish that setup ourselves on first run.
+// Electron ships its ~100MB binary via a postinstall step. Some machines block
+// install scripts for security, leaving the binary un-downloaded. We run as a
+// user-invoked command (not an install hook) and drive Electron's own installer
+// directly with Node — so this recovery needs no package manager at all.
 if (!electron) {
-  try {
-    const electronDir = dirname(require.resolve('electron/package.json'))
+  const dir = electronDir()
+  if (dir) {
     console.error('meowverlay: first-run setup — downloading the Electron runtime…')
-    const res = spawnSync(process.execPath, [join(electronDir, 'install.js')], {
-      stdio: 'inherit',
-      cwd: electronDir,
-    })
-    if (res.status === 0) electron = resolveElectron()
-  } catch {
-    // fall through to the guidance below
+    try {
+      const res = spawnSync(process.execPath, [join(dir, 'install.js')], { stdio: 'inherit', cwd: dir })
+      if (res.status === 0) electron = resolveElectron()
+    } catch {
+      // fall through to guidance
+    }
   }
 }
 
 if (!electron) {
+  const pm = detectManager()
+  const installedButBroken = electronDir() !== null
+  const advice = {
+    npm: 'npm i -g meowverlay --allow-scripts=electron',
+    pnpm: 'pnpm add -g meowverlay && pnpm approve-builds -g',
+    yarn: 'yarn global add meowverlay',
+    bun: 'bun add -g --trust meowverlay',
+  }
   console.error(
-    '\nCould not set up the Electron runtime automatically. Reinstall allowing its\n' +
-      'setup script to run:\n\n' +
-      '  npm i -g meowverlay --allow-scripts=electron\n\n' +
-      'or, to allow it for all global installs:\n\n' +
-      '  npm config set allow-scripts=electron --location=user && npm i -g meowverlay\n',
+    '\nCould not set up the Electron runtime automatically' +
+      (installedButBroken ? ' (its binary is missing).' : ' (electron is not installed).') +
+      '\n' +
+      (pm
+        ? `Reinstall so its setup script is allowed to run:\n\n  ${advice[pm]}\n`
+        : 'No package manager (npm/pnpm/yarn/bun) was found on your PATH.\n' +
+          'Install Node.js 20+ (which includes npm) from https://nodejs.org, then:\n\n' +
+          '  npm i -g meowverlay --allow-scripts=electron\n'),
   )
   process.exit(1)
 }
