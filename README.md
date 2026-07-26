@@ -330,6 +330,70 @@ memory** — the pet now learns your name from conversation and notices your dai
 
 ---
 
+## Contributing
+
+Contributions are welcome — new behaviours, personalities, poses, or platform work.
+
+### Prerequisites
+
+- **macOS** (the overlay, `CGWindowList`, and the Swift helper are macOS-specific).
+- **Node.js 20+**.
+- **Xcode Command Line Tools** for `swiftc` — `xcode-select --install`.
+
+### Getting started
+
+```bash
+git clone git@github.com:pm-2001/my-pets.git
+cd my-pets
+npm install
+npm run dev     # Vite dev server + Electron, hot-reload for the renderer
+# or
+npm start       # full build, then run
+```
+
+Quit from the **menu-bar cat icon** — there is no dock icon and no window to close. Pet
+state lives in `~/Library/Application Support/desktop-pet/`; delete it or use **Forget
+everything…** to start fresh.
+
+### The layout, and where changes go
+
+Read [Architecture](#architecture) first. The two processes talk only through
+`src/shared/types.ts`, so start there when you change the contract. Common changes:
+
+- **A new behaviour** — add an `ActionId` and a scoring rule in `src/brain/actions.ts`, its
+  motion in `src/brain/pet.ts`, and (if it needs a new look) a pose in `src/render/cat.ts`.
+  Nothing is a state machine; an action just has to score well when it should run.
+- **A new personality** — add an archetype in `src/brain/personality.ts` and a voice + lines
+  in `electron/chat.ts`.
+- **A new chat command** — add a keyword row to `parseIntent` in `src/App.tsx`.
+- **Perception** — sensors live in `electron/sensors.ts` and `electron/native/deskscan.swift`.
+  Anything new here **must keep the zero-permission property** (see [No permission
+  prompts](#no-permission-prompts)); a change that triggers a TCC dialog on first run will
+  not be merged without being strictly opt-in.
+
+### Before you open a PR
+
+```bash
+npm run typecheck   # tsc across main, preload and renderer — keep it green
+npm run build       # must build cleanly
+```
+
+There is no unit-test runner, but the brain and physics are plain TypeScript with no DOM
+dependency, so they can be exercised headlessly — bundle a small script with `esbuild`
+(`--alias:@shared=./src/shared`) and drive a `Pet` against a `Desktop` in Node. That is how
+the climb and command behaviours were verified. For the renderer, the env-gated hooks in
+[Dev tooling](#dev-tooling) (`PET_DEBUG`, `PET_CAPTURE`, `PET_POSE`) let you inspect a
+transparent, always-on-top window without Screen Recording permission.
+
+Match the surrounding style: small modules, generous comments that explain *why*, and no new
+runtime dependencies unless there is a strong reason. Then branch, commit, and open a pull
+request against `main` describing what changed and how you checked it.
+
+---
+
 ## Licence
 
-Unlicensed / private project.
+No licence has been chosen yet, which means the code is "all rights reserved" by default —
+fine for running from source, but a blocker for outside contributions. If you want to accept
+community contributions, add a permissive licence (e.g. MIT) at the repo root and note it
+here; contributors should not send PRs assuming one until it exists.

@@ -178,7 +178,9 @@ function refreshTrayMenu(): void {
             ensureAssignments()
             broadcastAssignments()
             scheduleSave()
-            console.log(`[pets] requested=${count} total=${pets.length} assignment=${[...assignment.entries()].map(([p, d]) => `${p}:${d}`).join(' ')}`)
+            if (process.env.PET_DEBUG === '1') {
+              console.log(`[pets] requested=${count} total=${pets.length} assignment=${[...assignment.entries()].map(([p, d]) => `${p}:${d}`).join(' ')}`)
+            }
           },
         })),
       },
