@@ -4,11 +4,12 @@
 // already built (dist/ + dist-electron/ with a universal deskscan helper), so no
 // Xcode or compile step is needed to run it.
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 
+const require = createRequire(import.meta.url)
 const appRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 if (process.platform !== 'darwin') {
@@ -20,12 +21,44 @@ if (process.platform !== 'darwin') {
   process.exit(0)
 }
 
-let electron
-try {
-  // The electron package exports the path to its executable.
-  electron = createRequire(import.meta.url)('electron')
-} catch {
-  console.error('Could not find the electron runtime. Try reinstalling: npm i -g meowverlay')
+// The electron package exports the path to its executable — but only once its
+// postinstall has downloaded the binary.
+function resolveElectron() {
+  try {
+    const p = require('electron')
+    return typeof p === 'string' ? p : null
+  } catch {
+    return null
+  }
+}
+
+let electron = resolveElectron()
+
+// Some machines block package install scripts for security, which leaves
+// Electron's binary un-downloaded. We are a user-invoked command, not an install
+// hook, so we can finish that setup ourselves on first run.
+if (!electron) {
+  try {
+    const electronDir = dirname(require.resolve('electron/package.json'))
+    console.error('meowverlay: first-run setup — downloading the Electron runtime…')
+    const res = spawnSync(process.execPath, [join(electronDir, 'install.js')], {
+      stdio: 'inherit',
+      cwd: electronDir,
+    })
+    if (res.status === 0) electron = resolveElectron()
+  } catch {
+    // fall through to the guidance below
+  }
+}
+
+if (!electron) {
+  console.error(
+    '\nCould not set up the Electron runtime automatically. Reinstall allowing its\n' +
+      'setup script to run:\n\n' +
+      '  npm i -g meowverlay --allow-scripts=electron\n\n' +
+      'or, to allow it for all global installs:\n\n' +
+      '  npm config set allow-scripts=electron --location=user && npm i -g meowverlay\n',
+  )
   process.exit(1)
 }
 
