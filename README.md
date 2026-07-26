@@ -1,4 +1,4 @@
-# my-pets
+# meowverlay
 
 One or several autonomous animated cats that live on your macOS desktop. They aren't
 widgets — they walk around your screen, stand on top of your application windows, chase
@@ -46,9 +46,9 @@ Silicon, Node 25, Electron 33.
 **macOS**, from your terminal — no clone, no Xcode:
 
 ```bash
-npx desktop-pet            # run it once
+npx meowverlay            # run it once
 # or install the command:
-npm i -g desktop-pet && desktop-pet
+npm i -g meowverlay && meowverlay
 ```
 
 A cat appears at the bottom of your screen and a small cat icon appears in your menu bar.
@@ -290,7 +290,7 @@ PET_CAPTURE=/tmp/pet.png PET_CAPTURE_DELAY=6 PET_CAPTURE_QUIT=1 npx electron .
 PET_POSE=climb npx electron .
 ```
 
-Pet state lives in `~/Library/Application Support/desktop-pet/` (`memory.json`,
+Pet state lives in `~/Library/Application Support/meowverlay/` (`memory.json`,
 `settings.json`). `memory.json` holds a `pets` array — one entry per pet — and a
 pre-multi-pet file is migrated to it automatically. Delete them, or use **Forget
 everything…** in the tray menu, to be reborn with new personalities and coats.
@@ -364,7 +364,7 @@ npm start       # full build, then run
 ```
 
 Quit from the **menu-bar cat icon** — there is no dock icon and no window to close. Pet
-state lives in `~/Library/Application Support/desktop-pet/`; delete it or use **Forget
+state lives in `~/Library/Application Support/meowverlay/`; delete it or use **Forget
 everything…** to start fresh.
 
 ### The layout, and where changes go
@@ -414,17 +414,17 @@ npm publish            # runs typecheck + build, then publishes
 ```
 
 Publish from a Mac with the Xcode Command Line Tools so the universal helper builds. Bump
-`version` first (`npm version patch`). If the name `desktop-pet` is already taken on npm,
-publish under a scope — set `"name": "@pm-2001/desktop-pet"` and run
-`npm publish --access public`; the install command becomes `npx @pm-2001/desktop-pet` while
-the launched command stays `desktop-pet`. Verify a release end to end by installing the
+`version` first (`npm version patch`). If the name `meowverlay` is already taken on npm,
+publish under a scope — set `"name": "@pm-2001/meowverlay"` and run
+`npm publish --access public`; the install command becomes `npx @pm-2001/meowverlay` while
+the launched command stays `meowverlay`. Verify a release end to end by installing the
 packed tarball into a scratch directory before publishing:
 
 ```bash
 npm pack
 mkdir /tmp/pettest && cd /tmp/pettest && npm init -y
-npm install /path/to/desktop-pet-<version>.tgz
-./node_modules/.bin/desktop-pet
+npm install /path/to/meowverlay-<version>.tgz
+./node_modules/.bin/meowverlay
 ```
 
 ---

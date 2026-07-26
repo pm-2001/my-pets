@@ -146,7 +146,7 @@ function trayIcon() {
 
 function buildTray(): void {
   tray = new Tray(trayIcon())
-  tray.setToolTip('desktop-pet — click for menu')
+  tray.setToolTip('meowverlay — click for menu')
   // A bare template icon is easy to lose among menu-bar items (and can hide
   // behind the notch). A short text title makes it unmistakable and clickable.
   tray.setTitle(' 🐱')

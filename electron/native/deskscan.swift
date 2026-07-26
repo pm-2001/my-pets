@@ -68,7 +68,7 @@ func scan() -> [Win] {
         if isStageManagerThumbnail(rect) { continue }
 
         // Our own overlay must never become a platform, or the pet stands on itself.
-        if owner == "Electron" || owner == "desktop-pet" || owner == "WindowManager" { continue }
+        if owner == "Electron" || owner == "meowverlay" || owner == "WindowManager" { continue }
 
         out.append(Win(id: number, app: owner,
                        x: rect.origin.x, y: rect.origin.y,
