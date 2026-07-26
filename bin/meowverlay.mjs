@@ -107,10 +107,34 @@ if (!electron) {
 }
 
 // Hand off to Electron, pointing it at this package (its package.json "main").
-// argv is forwarded so env-gated dev flags still work.
-const child = spawn(electron, [appRoot, ...process.argv.slice(2)], { stdio: 'inherit' })
-child.on('close', (code) => process.exit(code ?? 0))
-child.on('error', (err) => {
-  console.error('Failed to launch meowverlay:', err.message)
-  process.exit(1)
-})
+const forwarded = process.argv.slice(2)
+
+// Stay attached to the terminal only for dev/capture flows or when asked; those
+// need stdio and a foreground process. Otherwise detach, so the pet keeps living
+// after the terminal closes — you quit it from the menu-bar icon, like any GUI
+// app — and the prompt returns immediately.
+const foreground =
+  forwarded.includes('--foreground') ||
+  forwarded.includes('-f') ||
+  process.env.PET_DEBUG === '1' ||
+  Boolean(process.env.PET_CAPTURE) ||
+  Boolean(process.env.PET_POSE)
+
+const args = [appRoot, ...forwarded.filter((a) => a !== '--foreground' && a !== '-f')]
+
+if (foreground) {
+  const child = spawn(electron, args, { stdio: 'inherit' })
+  child.on('close', (code) => process.exit(code ?? 0))
+  child.on('error', (err) => {
+    console.error('Failed to launch meowverlay:', err.message)
+    process.exit(1)
+  })
+} else {
+  const child = spawn(electron, args, { stdio: 'ignore', detached: true })
+  child.on('error', (err) => {
+    console.error('Failed to launch meowverlay:', err.message)
+    process.exit(1)
+  })
+  child.unref()
+  console.log('meowverlay is running — quit it from the 🐱 icon in your menu bar.')
+}
