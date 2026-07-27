@@ -2,149 +2,146 @@ import type { AnimState } from '../brain/pet'
 import { PET_HEIGHT } from '../brain/pet'
 
 /**
- * The pet: a front-facing kawaii cat, drawn procedurally with Canvas2D.
+ * The pet: a flat-vector side-profile cat, drawn procedurally on a small
+ * skeleton so every movement is defined by joints rather than hand-drawn frames.
  *
- * Everything is drawn immediate-mode each frame — no image assets — so each pet
- * keeps its own seeded coat colour (with a matching darker outline) while sharing
- * one friendly face. The behaviour engine is untouched: `update()` advances a
- * lerped `Pose`, `draw()` renders it.
+ * The rig, in body-local units (origin at the ground between the paws, +x is the
+ * way the cat faces, -y is up):
+ *   - a spine from hip -> shoulder, a neck/head off the shoulder, a 3-joint tail
+ *     off the hip (all forward-kinematic);
+ *   - four legs, each a thigh + shank solved by 2-bone IK to a *foot target* on
+ *     (or above) the ground, so paws plant and the knees bend correctly.
  *
- * Posture follows movement. Standing still, the cat *sits* — belly to the ground,
- * two front paws, tail curled. To walk it *stands up on four legs* that step in
- * diagonal pairs, and sits back down when it stops; a `stand` value blends
- * smoothly between the two. Squash-and-stretch is kept gentle so it never
- * flattens into a pancake.
- *
- * Outlines use a "stroke behind" trick: fill the whole silhouette first, then
- * stroke it again with `destination-over` so only the outer rim shows — a single
- * clean outline with no seams where head, body, legs and ears overlap.
+ * `update()` lerps a small set of rig parameters towards a per-state target and
+ * advances the walk cycle; `draw()` solves the skeleton and paints flat shapes on
+ * it. No image assets, so each pet keeps its own seeded coat colour. Facing flips
+ * the whole rig horizontally.
  */
-
-interface Pose {
-  /** Vertical sink of the whole cat; positive lowers it (sit/sleep). */
-  bodyY: number
-  bodyRot: number
-  bodyScaleY: number
-  bodyScaleX: number
-  headRot: number
-  headY: number
-  legSwing: number
-  legRate: number
-  /** 0 closed, 1 wide open. */
-  eyeOpen: number
-  tailBase: number
-  tailWag: number
-  tailRate: number
-  /** Ears prick up as this rises, droop when negative. */
-  earPerk: number
-  /** Raises the front paws, for waving / celebrating / scratching. */
-  frontPaw: number
-}
-
-const REST: Pose = {
-  bodyY: 0,
-  bodyRot: 0,
-  bodyScaleY: 1,
-  bodyScaleX: 1,
-  headRot: 0,
-  headY: 0,
-  legSwing: 0,
-  legRate: 0,
-  eyeOpen: 1,
-  tailBase: 0,
-  tailWag: 0.06,
-  tailRate: 1.4,
-  earPerk: 0,
-  frontPaw: 0,
-}
-
-const POSES: Record<AnimState, Partial<Pose>> = {
-  idle: {},
-  look: { earPerk: 0.4, tailWag: 0.14, tailRate: 2.2 },
-  walk: { legRate: 9, tailWag: 0.18, tailRate: 5, earPerk: 0.1 },
-  run: { legRate: 17, tailWag: 0.24, tailRate: 9, earPerk: 0.2 },
-  sit: { bodyY: 3, tailWag: 0.08, tailRate: 1.1 },
-  // Lowers and closes its eyes — a gentle settle, not a flattening.
-  sleep: { bodyY: 7, bodyScaleY: 0.95, eyeOpen: 0, earPerk: -0.3, tailWag: 0.03, tailRate: 0.5 },
-  jump: { bodyScaleY: 1.08, bodyScaleX: 0.95, earPerk: 0.5, frontPaw: 0.35, tailWag: 0.2 },
-  fall: { bodyScaleY: 1.05, bodyScaleX: 0.97, earPerk: 0.55, frontPaw: 0.2 },
-  stretch: { bodyY: -2, bodyScaleY: 1.08, bodyScaleX: 0.96, eyeOpen: 0.3, earPerk: 0.2 },
-  dance: { earPerk: 0.5, tailWag: 0.5, tailRate: 12, headRot: 0.14 },
-  celebrate: { earPerk: 0.85, tailWag: 0.45, tailRate: 11, frontPaw: 1, eyeOpen: 1 },
-  scratch: { frontPaw: 1, earPerk: 0.3, tailWag: 0.2, tailRate: 4 },
-  climb: { frontPaw: 1, earPerk: 0.3, tailWag: 0.08 },
-}
 
 const H = PET_HEIGHT
 
 function css(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`
 }
-
-function lighten(color: number, amount: number): number {
+function lighten(color: number, a: number): number {
   const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
-  const m = (c: number) => Math.round(c + (255 - c) * amount)
+  const m = (c: number) => Math.round(c + (255 - c) * a)
+  return (m(r) << 16) | (m(g) << 8) | m(b)
+}
+function darken(color: number, a: number): number {
+  const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
+  const m = (c: number) => Math.round(c * (1 - a))
   return (m(r) << 16) | (m(g) << 8) | m(b)
 }
 
-function darken(color: number, amount: number): number {
-  const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
-  const m = (c: number) => Math.round(c * (1 - amount))
-  return (m(r) << 16) | (m(g) << 8) | m(b)
+interface Vec { x: number; y: number }
+
+/** The tunable state of the skeleton — what a pose sets and update() lerps. */
+interface Rig {
+  hipY: number      // hip height above ground (up = larger)
+  shoulderY: number // shoulder height above ground
+  bodyLen: number   // hip -> shoulder distance
+  headAngle: number // neck angle: 0 level, + lowers the muzzle
+  headOut: number   // how far the head reaches forward from the shoulder
+  earPerk: number
+  eyeOpen: number
+  tail: [number, number, number] // three tail joint angles (rad)
+  /** Foot targets, in ground-local x offset from their rest column; y is lift. */
+  gait: number      // 0 planted, 1 full walk cycle
+  stride: number    // stride length in units of H
+  crouch: number    // lowers everything (sleep)
 }
 
-function ellipsePath(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number): void {
-  ctx.beginPath()
-  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+const STAND: Rig = {
+  hipY: 0.6,
+  shoulderY: 0.62,
+  bodyLen: 0.6,
+  headAngle: 0,
+  headOut: 1,
+  earPerk: 0,
+  eyeOpen: 1,
+  // Up and back off the rump, tip curling forward — a proud upright tail.
+  tail: [-2.05, 0.5, 0.55],
+  gait: 0,
+  stride: 0.12,
+  crouch: 0,
 }
 
-interface Leg {
-  x: number
-  /** Y the leg attaches under the body. */
-  topY: number
-  /** How far the paw is lifted off the ground this frame. */
-  lift: number
-  front: boolean
+function poseFor(anim: AnimState): Partial<Rig> {
+  switch (anim) {
+    case 'walk':
+      return { gait: 1, stride: 0.12, tail: [-2.0, 0.45, 0.5], earPerk: 0.1 }
+    case 'run':
+      return { gait: 1, stride: 0.2, hipY: 0.56, shoulderY: 0.58, tail: [-1.85, 0.35, 0.4], earPerk: 0.2, headAngle: 0.1 }
+    case 'look':
+      return { earPerk: 0.5, headAngle: -0.15, tail: [-2.0, 0.4, 0.4] }
+    case 'sit':
+      // Haunches down at the back, forelegs straight, chest up.
+      return { hipY: 0.26, shoulderY: 0.64, bodyLen: 0.5, tail: [-1.7, -0.2, -0.2], headAngle: -0.05 }
+    case 'sleep':
+      // A low loaf with the head tucked down.
+      return { hipY: 0.2, shoulderY: 0.24, bodyLen: 0.66, crouch: 0.12, headAngle: 0.5, headOut: 0.7, eyeOpen: 0, earPerk: -0.3, tail: [-1.2, 0.3, 0.5] }
+    case 'stretch':
+      return { hipY: 0.7, shoulderY: 0.42, bodyLen: 0.72, headAngle: -0.2, tail: [-2.7, -0.6, -0.5], eyeOpen: 0.4 }
+    case 'jump':
+      return { hipY: 0.74, shoulderY: 0.78, bodyLen: 0.58, headAngle: -0.2, earPerk: 0.4, tail: [-2.9, -0.7, -0.6] }
+    case 'fall':
+      return { hipY: 0.5, shoulderY: 0.52, headAngle: 0.1, earPerk: 0.5, tail: [-1.8, 0.2, 0.3] }
+    case 'dance':
+      return { earPerk: 0.5, tail: [-2.2, -0.6, -0.6], headAngle: -0.1 }
+    case 'celebrate':
+      return { earPerk: 0.8, hipY: 0.62, tail: [-2.7, -0.7, -0.6], headAngle: -0.2 }
+    case 'scratch':
+      return { earPerk: 0.3, tail: [-2.3, -0.3, -0.3] }
+    case 'climb':
+      return { headAngle: -0.3, earPerk: 0.3, tail: [-1.6, -0.2, -0.2] }
+    default:
+      return {}
+  }
+}
+
+/** Solve a 2-bone chain from joint J so the paw reaches target F; return the knee. */
+function ik(J: Vec, F: Vec, l1: number, l2: number, bend: number): Vec {
+  let dx = F.x - J.x, dy = F.y - J.y
+  let d = Math.hypot(dx, dy)
+  const min = Math.abs(l1 - l2) + 1e-3
+  const max = l1 + l2 - 1e-3
+  if (d < min) d = min
+  if (d > max) d = max
+  const base = Math.atan2(dy, dx)
+  const cosA = (d * d + l1 * l1 - l2 * l2) / (2 * d * l1)
+  const a = Math.acos(Math.max(-1, Math.min(1, cosA)))
+  const ka = base + bend * a
+  return { x: J.x + l1 * Math.cos(ka), y: J.y + l1 * Math.sin(ka) }
 }
 
 export class CatRenderer {
   private coat: string
-  private coatHi: string
-  private coatLo: string
-  private outline: string
+  private stripe: string
+  private shade: string
   private belly: string
-  private readonly pink = '#eba7c6'
-  private readonly blush = 'rgba(233, 150, 180, 0.55)'
-  private readonly nose = '#c98ba6'
-  private readonly eye = '#2b2533'
+  private ear: string
+  private dark: string
 
-  private pose: Pose = { ...REST }
+  private rig: Rig = { ...STAND, tail: [...STAND.tail] as [number, number, number] }
   private legPhase = 0
   private blinkTimer = 2
   private blinkAmount = 1
   private squash = 0
   private squashVelocity = 0
   private time = 0
-  /** 0 sitting, 1 standing on all fours; blends with movement. */
-  private stand = 0
 
   private anim: AnimState = 'idle'
   private facing: 1 | -1 = 1
   private scale = 1
 
-  // Per-frame posture, computed once in drawCat and read by the draw passes.
-  private bodyCY = 0
-  private bodyRx = 0
-  private bodyRy = 0
-  private headCY = 0
-  private legs: Leg[] = []
-
   constructor(palette: { coat: number; belly: number; accent: number }) {
     this.coat = css(palette.coat)
-    this.coatHi = css(lighten(palette.coat, 0.2))
-    this.coatLo = css(darken(palette.coat, 0.13))
-    this.outline = css(darken(palette.coat, 0.55))
-    this.belly = css(lighten(palette.coat, 0.82))
+    this.stripe = css(darken(palette.coat, 0.17))
+    this.shade = css(darken(palette.coat, 0.1))
+    this.belly = css(lighten(palette.coat, 0.55))
+    this.ear = css(lighten(palette.coat, 0.28))
+    this.dark = css(darken(palette.coat, 0.62))
   }
 
   update(dt: number, anim: AnimState, facing: 1 | -1, speed: number, scale: number): void {
@@ -153,334 +150,327 @@ export class CatRenderer {
     this.facing = facing
     this.scale = scale
 
-    const target = { ...REST, ...POSES[anim] }
-    const k = 1 - Math.exp(-12 * dt)
-    for (const key of Object.keys(this.pose) as (keyof Pose)[]) {
-      this.pose[key] += (target[key] - this.pose[key]) * k
-    }
-
-    // Stand up to walk/run, sit back down otherwise.
-    const wantStand = anim === 'walk' || anim === 'run' ? 1 : 0
-    this.stand += (wantStand - this.stand) * (1 - Math.exp(-9 * dt))
+    const target: Rig = { ...STAND, ...poseFor(anim) }
+    const k = 1 - Math.exp(-11 * dt)
+    this.rig.hipY += (target.hipY - this.rig.hipY) * k
+    this.rig.shoulderY += (target.shoulderY - this.rig.shoulderY) * k
+    this.rig.bodyLen += (target.bodyLen - this.rig.bodyLen) * k
+    this.rig.headAngle += (target.headAngle - this.rig.headAngle) * k
+    this.rig.headOut += (target.headOut - this.rig.headOut) * k
+    this.rig.earPerk += (target.earPerk - this.rig.earPerk) * k
+    this.rig.gait += (target.gait - this.rig.gait) * k
+    this.rig.stride += (target.stride - this.rig.stride) * k
+    this.rig.crouch += (target.crouch - this.rig.crouch) * k
+    this.rig.tail[0] += (target.tail[0] - this.rig.tail[0]) * k
+    this.rig.tail[1] += (target.tail[1] - this.rig.tail[1]) * k
+    this.rig.tail[2] += (target.tail[2] - this.rig.tail[2]) * k
 
     this.updateBlink(dt, target.eyeOpen)
     this.updateSquash(dt)
-
-    const rate = this.pose.legRate > 0 ? this.pose.legRate : 0
-    this.legPhase += (rate + Math.abs(speed) * 0.05) * dt
+    // Advance the walk cycle only while there is gait; faster when running.
+    if (this.rig.gait > 0.03) {
+      const rate = 5 + Math.abs(speed) * 0.06 + (anim === 'run' ? 5 : 0)
+      this.legPhase += rate * dt
+    }
   }
 
-  /** Draw the pet with its feet at the current context origin. */
   draw(ctx: CanvasRenderingContext2D): void {
-    const p = this.pose
-    const sleeping = this.anim === 'sleep'
-    const breath = Math.sin(this.time * (sleeping ? 1.1 : 2.4)) * (sleeping ? 0.028 : 0.014)
-    const airborne = this.anim === 'jump' || this.anim === 'fall'
-    // Body bobs as it strides.
-    const bob = Math.abs(Math.sin(this.legPhase)) * H * 0.03 * this.stand
-    const lean = this.stand * this.facing * 0.05 + (this.anim === 'dance' ? Math.sin(this.time * 6) * 0.12 : 0)
+    const r = this.rig
+    const breath = Math.sin(this.time * (this.anim === 'sleep' ? 1.1 : 2.4)) * (this.anim === 'sleep' ? 0.02 : 0.01)
+    const crouch = r.crouch * H
 
-    if (!airborne && this.anim !== 'climb') {
-      ctx.save()
-      ctx.scale(this.scale, this.scale)
-      const sw = H * (0.44 - 0.06 * this.stand)
-      const g = ctx.createRadialGradient(0, -H * 0.01, 0, 0, -H * 0.01, sw)
-      g.addColorStop(0, 'rgba(0,0,0,0.2)')
-      g.addColorStop(1, 'rgba(0,0,0,0)')
-      ellipsePath(ctx, 0, -H * 0.01, sw, H * 0.09)
-      ctx.fillStyle = g
-      ctx.fill()
-      ctx.restore()
+    // --- key joints (canonical: facing +x, ground at y=0) ---
+    const hip: Vec = { x: -H * 0.3, y: -r.hipY * H + crouch }
+    const shoulder: Vec = { x: H * 0.3, y: -r.shoulderY * H + crouch }
+    // Neck/head off the shoulder.
+    const spineA = Math.atan2(shoulder.y - hip.y, shoulder.x - hip.x)
+    const neck: Vec = { x: shoulder.x + H * 0.12, y: shoulder.y - H * 0.02 }
+    const headBob = Math.abs(Math.sin(this.legPhase)) * H * 0.015 * r.gait
+    const head: Vec = {
+      x: neck.x + Math.cos(-0.5 + r.headAngle) * H * 0.24 * r.headOut,
+      y: neck.y + Math.sin(-0.5 + r.headAngle) * H * 0.24 * r.headOut + headBob,
     }
 
-    ctx.save()
-    ctx.scale(this.scale, this.scale)
-    ctx.translate(0, -bob + p.bodyY)
-    // Keep squash/stretch subtle so the cat never flattens into a pancake.
-    const sx = p.bodyScaleX * (1 - this.squash * 0.16)
-    const sy = (p.bodyScaleY + breath) * (1 + this.squash * 0.22)
-    ctx.scale(sx, sy)
-    ctx.rotate(lean)
+    // --- feet (IK targets) ---
+    const walk = r.gait
+    const foot = (restX: number, phaseOff: number): Vec => {
+      const t = ((this.legPhase / (Math.PI * 2) + phaseOff) % 1 + 1) % 1
+      let fx = restX
+      let fy = 0
+      if (walk > 0.02) {
+        if (t < 0.5) {
+          // Stance: paw planted, sliding backward from +stride to -stride.
+          fx = restX + r.stride * H * (1 - 4 * t)
+        } else {
+          // Swing: lift and swing forward from -stride back to +stride.
+          const u = (t - 0.5) / 0.5
+          fx = restX + r.stride * H * (2 * u - 1)
+          fy = -Math.sin(u * Math.PI) * H * 0.16
+        }
+        fx = restX + (fx - restX) * walk
+        fy *= walk
+      }
+      return { x: fx, y: fy }
+    }
+    // Front legs hang from the shoulder, back legs from the hip; near/far offset.
+    const jFrontNear: Vec = { x: shoulder.x - H * 0.04, y: shoulder.y + H * 0.16 }
+    const jFrontFar: Vec = { x: shoulder.x + H * 0.02, y: shoulder.y + H * 0.16 }
+    const jBackNear: Vec = { x: hip.x + H * 0.04, y: hip.y + H * 0.16 }
+    const jBackFar: Vec = { x: hip.x - H * 0.02, y: hip.y + H * 0.16 }
+    const fFrontNear = foot(H * 0.34, 0)
+    const fFrontFar = foot(H * 0.34, 0.5)
+    const fBackNear = foot(-H * 0.26, 0.5)
+    const fBackFar = foot(-H * 0.26, 0)
 
-    this.drawCat(ctx)
-    this.drawZs(ctx)
+    // --- paint ---
+    ctx.save()
+    ctx.scale(this.facing * this.scale, this.scale)
+
+    // Far legs (behind the body), darker.
+    this.drawLeg(ctx, jFrontFar, fFrontFar, this.shade)
+    this.drawLeg(ctx, jBackFar, fBackFar, this.shade)
+
+    this.drawTail(ctx, hip)
+    this.drawBody(ctx, hip, shoulder, spineA, breath)
+    this.drawHead(ctx, neck, head)
+
+    // Near legs (in front), full colour.
+    this.drawLeg(ctx, jBackNear, fBackNear, this.coat)
+    this.drawLeg(ctx, jFrontNear, fFrontNear, this.coat)
 
     ctx.restore()
+
+    this.drawZs(ctx, head)
   }
 
-  private drawCat(ctx: CanvasRenderingContext2D): void {
-    const stand = this.stand
-    // Standing lifts and narrows the body so all four legs show beneath and
-    // beside it; the hind pair sits just outside the body's edge.
-    this.bodyCY = -H * (0.42 + 0.17 * stand)
-    this.bodyRx = H * (0.36 - 0.05 * stand)
-    this.bodyRy = H * (0.42 - 0.13 * stand)
-    this.headCY = -H * (0.95 + 0.08 * stand)
-
-    // Four legs, stepping in diagonal pairs (front-left with hind-right).
-    const amp = H * 0.08 * stand
-    const sF = Math.max(0, Math.sin(this.legPhase))
-    const sB = Math.max(0, Math.sin(this.legPhase + Math.PI))
-    const bodyBottom = this.bodyCY + this.bodyRy
-    // Front paws keep a small presence even when sitting; hind legs only emerge
-    // as the cat stands (they hide behind the wider sitting body).
-    const frontTop = Math.min(-H * 0.14, bodyBottom + H * 0.04)
-    const hindTop = bodyBottom - H * 0.02
-    this.legs = [
-      { x: -H * 0.33, topY: hindTop, lift: sB * amp, front: false },
-      { x: H * 0.33, topY: hindTop, lift: sF * amp, front: false },
-      { x: -H * 0.13, topY: frontTop, lift: sF * amp, front: true },
-      { x: H * 0.13, topY: frontTop, lift: sB * amp, front: true },
-    ]
-
-    this.silhouette(ctx, 'fill')
-    this.shade(ctx)
-    ctx.save()
-    ctx.globalCompositeOperation = 'destination-over'
-    this.silhouette(ctx, 'stroke')
-    ctx.restore()
-    this.face(ctx)
-  }
-
-  private silhouette(ctx: CanvasRenderingContext2D, mode: 'fill' | 'stroke'): void {
-    const p = this.pose
-    const line = Math.max(1.5, H * 0.055)
-    const stroke = mode === 'stroke'
+  private drawLeg(ctx: CanvasRenderingContext2D, J: Vec, F: Vec, color: string): void {
+    const l1 = H * 0.26, l2 = H * 0.28
+    // Front legs (positive x joints) bend their elbow back; hind legs bend forward.
+    const bend = J.x > 0 ? 1 : -1
+    const K = ik(J, F, l1, l2, bend)
+    ctx.strokeStyle = color
+    ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
-    ctx.lineCap = 'round'
-    ctx.lineWidth = line
-    ctx.strokeStyle = this.outline
-    const paint = (fill: string) => {
-      if (stroke) ctx.stroke()
-      else {
-        ctx.fillStyle = fill
-        ctx.fill()
-      }
-    }
-
-    const leg = (l: Leg) => {
-      const w = l.front ? H * 0.14 : H * 0.13
-      const bottom = -l.lift
-      if (bottom - l.topY < H * 0.02) return
-      ctx.beginPath()
-      ctx.roundRect(l.x - w / 2, l.topY, w, bottom - l.topY, w * 0.5)
-      // Hind legs are a shade darker so they read as further back.
-      paint(l.front ? this.coat : this.coatLo)
-    }
-
-    // --- tail: curled beside a sitting cat, raised up and back when it stands
-    // to walk so it clears the hind legs ---
-    const tSide = -this.facing
-    const wag = Math.sin(this.time * p.tailRate) * p.tailWag
-    ctx.save()
-    ctx.translate(tSide * H * (0.26 - 0.06 * this.stand), -H * (0.16 + 0.28 * this.stand))
-    ctx.rotate(tSide * (0.2 - 0.5 * this.stand + wag))
+    ctx.lineWidth = H * 0.14
     ctx.beginPath()
-    ctx.moveTo(0, 0)
-    ctx.quadraticCurveTo(tSide * H * 0.44, -H * 0.02, tSide * H * 0.5, -H * 0.34)
-    ctx.quadraticCurveTo(tSide * H * 0.54, -H * 0.6, tSide * H * 0.34, -H * 0.66)
-    if (stroke) {
-      ctx.lineWidth = line + H * 0.16
-      ctx.stroke()
-      ctx.lineWidth = line
-    } else {
-      ctx.lineWidth = H * 0.16
-      ctx.strokeStyle = this.coat
-      ctx.stroke()
-      ctx.strokeStyle = this.outline
-      ctx.lineWidth = line
+    ctx.moveTo(J.x, J.y)
+    ctx.lineTo(K.x, K.y)
+    ctx.stroke()
+    ctx.lineWidth = H * 0.1
+    ctx.beginPath()
+    ctx.moveTo(K.x, K.y)
+    ctx.lineTo(F.x, F.y)
+    ctx.stroke()
+    // Paw.
+    ctx.beginPath()
+    ctx.ellipse(F.x + H * 0.03, F.y - H * 0.02, H * 0.075, H * 0.055, 0, 0, Math.PI * 2)
+    ctx.fillStyle = color
+    ctx.fill()
+  }
+
+  private drawTail(ctx: CanvasRenderingContext2D, hip: Vec): void {
+    const r = this.rig
+    const wag = Math.sin(this.time * 2.4) * 0.12 * (this.anim === 'walk' || this.anim === 'run' ? 1.6 : 1)
+    let x = hip.x - H * 0.08
+    let y = hip.y + H * 0.02
+    let ang = r.tail[0]!
+    const pts: Vec[] = [{ x, y }]
+    const segs = [H * 0.24, H * 0.22, H * 0.2]
+    for (let i = 0; i < 3; i++) {
+      ang += (i === 0 ? 0 : r.tail[i]!) + wag * (i + 1) * 0.5
+      x += Math.cos(ang) * segs[i]!
+      y += Math.sin(ang) * segs[i]!
+      pts.push({ x, y })
     }
-    ctx.restore()
-
-    // --- hind legs (behind the body) ---
-    for (const l of this.legs) if (!l.front) leg(l)
-
-    // --- body ---
-    ellipsePath(ctx, 0, this.bodyCY, this.bodyRx, this.bodyRy)
-    paint(this.coat)
-
-    // --- front legs (in front of the body) ---
-    for (const l of this.legs) if (l.front) leg(l)
-
-    // --- head ---
-    ellipsePath(ctx, 0, this.headCY, H * 0.46, H * 0.42)
-    paint(this.coat)
-
-    // --- ears ---
-    const eTop = this.headCY - H * 0.23
-    for (const side of [-1, 1] as const) {
-      const perk = p.earPerk * 0.12
+    ctx.strokeStyle = this.coat
+    ctx.lineCap = 'round'
+    ctx.lineWidth = H * 0.13
+    ctx.beginPath()
+    ctx.moveTo(pts[0]!.x, pts[0]!.y)
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i]!.x, pts[i]!.y)
+    ctx.stroke()
+    // Tail stripes.
+    ctx.strokeStyle = this.stripe
+    ctx.lineWidth = H * 0.13
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]!, b = pts[i]!
+      const mx = a.x + (b.x - a.x) * 0.55, my = a.y + (b.y - a.y) * 0.55
       ctx.beginPath()
-      ctx.moveTo(side * H * 0.44, eTop + H * (0.05 - perk))
-      ctx.quadraticCurveTo(side * H * 0.28, eTop - H * (0.27 + perk), side * H * 0.12, eTop - H * (0.05 + perk * 0.4))
-      ctx.quadraticCurveTo(side * H * 0.3, eTop + H * 0.07, side * H * 0.44, eTop + H * (0.05 - perk))
-      ctx.closePath()
-      paint(this.coat)
+      ctx.moveTo(a.x + (b.x - a.x) * 0.35, a.y + (b.y - a.y) * 0.35)
+      ctx.lineTo(mx, my)
+      ctx.stroke()
     }
   }
 
-  private shade(ctx: CanvasRenderingContext2D): void {
-    // Head highlight (light from upper-left).
-    ctx.globalAlpha = 0.5
-    ellipsePath(ctx, -H * 0.16, this.headCY - H * 0.11, H * 0.16, H * 0.2)
-    ctx.fillStyle = this.coatHi
-    ctx.fill()
-    // Soft shadow on the lower-right of the body.
-    ctx.globalAlpha = 0.26
-    ellipsePath(ctx, H * 0.13, this.bodyCY + H * 0.02, this.bodyRx * 0.7, this.bodyRy * 0.9)
-    ctx.fillStyle = this.coatLo
-    ctx.fill()
-    ctx.globalAlpha = 1
+  private drawBody(ctx: CanvasRenderingContext2D, hip: Vec, shoulder: Vec, spineA: number, breath: number): void {
+    // Perpendicular (up) to the spine.
+    const nx = Math.sin(spineA), ny = -Math.cos(spineA)
+    const topR = H * (0.28 + breath)
+    const botR = H * 0.3
+    const rump = { x: hip.x - H * 0.06, y: hip.y }
+    const withr = (p: Vec, r: number) => ({ x: p.x + nx * r, y: p.y + ny * r })
 
-    // White belly bib (chest down the front).
-    const top = this.bodyCY - this.bodyRy * 0.72
+    // Body outline: back (top) rump -> shoulder, chest down, belly back to rump.
+    const backRump = withr(rump, topR)
+    const backSh = withr(shoulder, topR * 0.95)
+    const chest = { x: shoulder.x + H * 0.16, y: shoulder.y + botR * 0.2 }
+    const bellyF = withr(shoulder, -botR)
+    const bellyB = withr(rump, -botR * 0.95)
+
+    ctx.fillStyle = this.coat
     ctx.beginPath()
-    ctx.moveTo(0, top)
-    ctx.quadraticCurveTo(H * 0.24, this.bodyCY - H * 0.16, H * 0.18, this.bodyCY + this.bodyRy * 0.62)
-    ctx.quadraticCurveTo(H * 0.1, this.bodyCY + this.bodyRy, 0, this.bodyCY + this.bodyRy)
-    ctx.quadraticCurveTo(-H * 0.1, this.bodyCY + this.bodyRy, -H * 0.18, this.bodyCY + this.bodyRy * 0.62)
-    ctx.quadraticCurveTo(-H * 0.24, this.bodyCY - H * 0.16, 0, top)
+    ctx.moveTo(backRump.x, backRump.y)
+    ctx.quadraticCurveTo(hip.x + (shoulder.x - hip.x) * 0.5 + nx * topR * 1.15, hip.y + (shoulder.y - hip.y) * 0.5 + ny * topR * 1.15, backSh.x, backSh.y)
+    ctx.quadraticCurveTo(shoulder.x + H * 0.2, shoulder.y - H * 0.02, chest.x, chest.y)
+    ctx.quadraticCurveTo(shoulder.x + H * 0.12, shoulder.y + botR * 0.9, bellyF.x, bellyF.y)
+    ctx.quadraticCurveTo(hip.x + (shoulder.x - hip.x) * 0.5 - nx * botR * 1.05, hip.y + (shoulder.y - hip.y) * 0.5 - ny * botR * 1.05, bellyB.x, bellyB.y)
+    ctx.quadraticCurveTo(rump.x - H * 0.16, rump.y, backRump.x, backRump.y)
+    ctx.closePath()
+    ctx.fill()
+
+    // Cream belly patch.
     ctx.fillStyle = this.belly
+    ctx.beginPath()
+    ctx.moveTo(chest.x - H * 0.04, chest.y + H * 0.02)
+    ctx.quadraticCurveTo(shoulder.x + H * 0.05, shoulder.y + botR * 0.85, bellyF.x - H * 0.02, bellyF.y - H * 0.02)
+    ctx.quadraticCurveTo(hip.x + (shoulder.x - hip.x) * 0.4 - nx * botR * 0.9, hip.y + (shoulder.y - hip.y) * 0.4 - ny * botR * 0.9, bellyB.x + H * 0.06, bellyB.y - H * 0.02)
+    ctx.quadraticCurveTo((chest.x + bellyB.x) / 2, (chest.y + bellyB.y) / 2 + H * 0.1, chest.x - H * 0.04, chest.y + H * 0.02)
+    ctx.closePath()
     ctx.fill()
 
-    // Inner ears (pink).
-    const eTop = this.headCY - H * 0.23
-    for (const side of [-1, 1] as const) {
-      const perk = this.pose.earPerk * 0.12
+    // Tabby stripes across the back.
+    ctx.strokeStyle = this.stripe
+    ctx.lineCap = 'round'
+    ctx.lineWidth = H * 0.055
+    for (const f of [0.35, 0.5, 0.65, 0.8]) {
+      const bx = hip.x + (shoulder.x - hip.x) * f
+      const by = hip.y + (shoulder.y - hip.y) * f
       ctx.beginPath()
-      ctx.moveTo(side * H * 0.38, eTop + H * (0.04 - perk))
-      ctx.quadraticCurveTo(side * H * 0.27, eTop - H * (0.19 + perk), side * H * 0.16, eTop - H * (0.03 + perk * 0.4))
-      ctx.quadraticCurveTo(side * H * 0.29, eTop + H * 0.05, side * H * 0.38, eTop + H * (0.04 - perk))
-      ctx.closePath()
-      ctx.fillStyle = this.pink
-      ctx.fill()
+      ctx.moveTo(bx + nx * topR * 0.9, by + ny * topR * 0.9)
+      ctx.lineTo(bx + nx * topR * 0.3, by + ny * topR * 0.3)
+      ctx.stroke()
     }
   }
 
-  private face(ctx: CanvasRenderingContext2D): void {
-    const open = Math.max(0.06, this.blinkAmount)
-    const cy = this.headCY
-
-    // Blush cheeks.
-    for (const side of [-1, 1] as const) {
-      ellipsePath(ctx, side * H * 0.29, cy + H * 0.08, H * 0.09, H * 0.055)
-      ctx.fillStyle = this.blush
-      ctx.fill()
-    }
-
-    // Eyes: big glossy black with catchlights; happy arcs when asleep.
-    for (const side of [-1, 1] as const) {
-      const ex = side * H * 0.17
-      if (open < 0.25) {
-        ctx.beginPath()
-        ctx.lineWidth = Math.max(1.5, H * 0.03)
-        ctx.strokeStyle = this.eye
-        ctx.lineCap = 'round'
-        ctx.arc(ex, cy - H * 0.01, H * 0.08, Math.PI * 0.15, Math.PI * 0.85)
-        ctx.stroke()
-      } else {
-        ctx.save()
-        ctx.translate(ex, cy - H * 0.01)
-        ctx.scale(1, open)
-        ellipsePath(ctx, 0, 0, H * 0.1, H * 0.13)
-        ctx.fillStyle = this.eye
-        ctx.fill()
-        ellipsePath(ctx, -H * 0.03, -H * 0.04, H * 0.035, H * 0.045)
-        ctx.fillStyle = '#ffffff'
-        ctx.fill()
-        ellipsePath(ctx, H * 0.03, H * 0.04, H * 0.02, H * 0.025)
-        ctx.fillStyle = 'rgba(255,255,255,0.85)'
-        ctx.fill()
-        ctx.restore()
-      }
-    }
-
-    // Nose + ω mouth.
-    ctx.beginPath()
-    ctx.moveTo(-H * 0.035, cy + H * 0.14)
-    ctx.quadraticCurveTo(0, cy + H * 0.19, H * 0.035, cy + H * 0.14)
-    ctx.quadraticCurveTo(H * 0.01, cy + H * 0.13, 0, cy + H * 0.135)
-    ctx.quadraticCurveTo(-H * 0.01, cy + H * 0.13, -H * 0.035, cy + H * 0.14)
-    ctx.fillStyle = this.nose
-    ctx.fill()
-
-    ctx.strokeStyle = this.outline
-    ctx.lineWidth = Math.max(1, H * 0.016)
+  private drawHead(ctx: CanvasRenderingContext2D, neck: Vec, head: Vec): void {
+    const r = this.rig
+    // Neck: a thick coat bridge so the head joins the body with no gap.
+    ctx.strokeStyle = this.coat
     ctx.lineCap = 'round'
+    ctx.lineWidth = H * 0.3
     ctx.beginPath()
-    ctx.moveTo(0, cy + H * 0.16)
-    ctx.lineTo(0, cy + H * 0.19)
-    ctx.moveTo(0, cy + H * 0.19)
-    ctx.quadraticCurveTo(-H * 0.05, cy + H * 0.235, -H * 0.09, cy + H * 0.2)
-    ctx.moveTo(0, cy + H * 0.19)
-    ctx.quadraticCurveTo(H * 0.05, cy + H * 0.235, H * 0.09, cy + H * 0.2)
+    ctx.moveTo(neck.x - H * 0.16, neck.y + H * 0.05)
+    ctx.lineTo(head.x - H * 0.03, head.y + H * 0.04)
     ctx.stroke()
 
+    // Ear (behind, on the crown).
+    const ang = Math.atan2(head.y - neck.y, head.x - neck.x)
+    ctx.fillStyle = this.coat
+    const earBase = { x: head.x - Math.cos(ang) * H * 0.06, y: head.y + Math.sin(ang) * 0 - H * 0.16 }
+    ctx.beginPath()
+    ctx.moveTo(earBase.x - H * 0.02, earBase.y + H * 0.08)
+    ctx.lineTo(earBase.x - H * 0.05, earBase.y - H * (0.16 + r.earPerk * 0.06))
+    ctx.lineTo(earBase.x + H * 0.13, earBase.y - H * 0.02)
+    ctx.closePath()
+    ctx.fill()
+    ctx.fillStyle = this.ear
+    ctx.beginPath()
+    ctx.moveTo(earBase.x, earBase.y + H * 0.04)
+    ctx.lineTo(earBase.x - H * 0.02, earBase.y - H * 0.1)
+    ctx.lineTo(earBase.x + H * 0.08, earBase.y - H * 0.01)
+    ctx.closePath()
+    ctx.fill()
+
+    // Head + muzzle.
+    ctx.fillStyle = this.coat
+    ctx.beginPath()
+    ctx.ellipse(head.x, head.y, H * 0.2, H * 0.185, 0, 0, Math.PI * 2)
+    ctx.fill()
+    // Muzzle wedge toward the front (+x).
+    ctx.beginPath()
+    ctx.moveTo(head.x + H * 0.05, head.y - H * 0.09)
+    ctx.quadraticCurveTo(head.x + H * 0.3, head.y - H * 0.02, head.x + H * 0.26, head.y + H * 0.08)
+    ctx.quadraticCurveTo(head.x + H * 0.18, head.y + H * 0.16, head.x + H * 0.02, head.y + H * 0.12)
+    ctx.closePath()
+    ctx.fill()
+
+    // Nose.
+    ctx.fillStyle = this.dark
+    ctx.beginPath()
+    ctx.moveTo(head.x + H * 0.24, head.y + H * 0.03)
+    ctx.lineTo(head.x + H * 0.29, head.y + H * 0.03)
+    ctx.lineTo(head.x + H * 0.265, head.y + H * 0.07)
+    ctx.closePath()
+    ctx.fill()
+
+    // Eye.
+    const open = Math.max(0.06, this.blinkAmount)
+    ctx.save()
+    ctx.translate(head.x + H * 0.05, head.y - H * 0.02)
+    ctx.scale(1, open)
+    ctx.beginPath()
+    ctx.ellipse(0, 0, H * 0.035, H * 0.05, 0, 0, Math.PI * 2)
+    ctx.fillStyle = this.dark
+    ctx.fill()
+    if (open > 0.4) {
+      ctx.beginPath()
+      ctx.ellipse(H * 0.012, -H * 0.016, H * 0.012, H * 0.014, 0, 0, Math.PI * 2)
+      ctx.fillStyle = '#ffffff'
+      ctx.fill()
+    }
+    ctx.restore()
+
     // Whiskers.
-    ctx.lineWidth = Math.max(0.8, H * 0.012)
-    ctx.globalAlpha = 0.75
-    for (const side of [-1, 1] as const) {
-      for (const dy of [-0.03, 0, 0.03]) {
-        ctx.beginPath()
-        ctx.moveTo(side * H * 0.16, cy + H * (0.16 + dy))
-        ctx.lineTo(side * H * 0.5, cy + H * (0.13 + dy * 2.4))
-        ctx.stroke()
-      }
+    ctx.strokeStyle = this.dark
+    ctx.globalAlpha = 0.55
+    ctx.lineWidth = Math.max(0.8, H * 0.008)
+    for (const dy of [-0.02, 0.01, 0.04]) {
+      ctx.beginPath()
+      ctx.moveTo(head.x + H * 0.22, head.y + H * (0.04 + dy))
+      ctx.lineTo(head.x + H * 0.5, head.y + H * (0.02 + dy * 2))
+      ctx.stroke()
     }
     ctx.globalAlpha = 1
-
-    // Toe lines on paws that are planted.
-    ctx.lineWidth = Math.max(0.8, H * 0.013)
-    for (const l of this.legs) {
-      if (l.lift > H * 0.01) continue
-      const w = (l.front ? H * 0.14 : H * 0.13) * 0.5
-      for (const t of [-0.4, 0.4]) {
-        ctx.beginPath()
-        ctx.moveTo(l.x + w * t, -H * 0.05)
-        ctx.lineTo(l.x + w * t, -H * 0.005)
-        ctx.stroke()
-      }
-    }
   }
 
-  private drawZs(ctx: CanvasRenderingContext2D): void {
+  private drawZs(ctx: CanvasRenderingContext2D, head: Vec): void {
     if (this.anim !== 'sleep') return
     ctx.save()
-    ctx.translate(H * 0.36, this.headCY - H * 0.28)
-    ctx.strokeStyle = this.outline
+    ctx.scale(this.scale, this.scale)
+    ctx.translate(this.facing * (head.x + H * 0.2), head.y - H * 0.25)
+    ctx.strokeStyle = this.dark
     ctx.lineWidth = Math.max(1.5, H * 0.02)
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
     for (let i = 0; i < 3; i++) {
       const phase = (this.time * 0.42 + i / 3) % 1
-      const s = 0.6 + phase * 0.7
+      const s = 0.55 + phase * 0.7
       ctx.globalAlpha = Math.sin(phase * Math.PI) * 0.8
       ctx.save()
-      ctx.translate(phase * H * 0.18, -phase * H * 0.5)
+      ctx.translate(phase * H * 0.16, -phase * H * 0.45)
       ctx.scale(s, s)
       ctx.beginPath()
       ctx.moveTo(0, 0)
-      ctx.lineTo(H * 0.08, 0)
-      ctx.lineTo(0, H * 0.08)
-      ctx.lineTo(H * 0.08, H * 0.08)
+      ctx.lineTo(H * 0.07, 0)
+      ctx.lineTo(0, H * 0.07)
+      ctx.lineTo(H * 0.07, H * 0.07)
       ctx.stroke()
       ctx.restore()
     }
-    ctx.globalAlpha = 1
     ctx.restore()
   }
 
   boundsFor(scale: number): { left: number; top: number; width: number; height: number } {
     return {
-      left: -1.2 * H * scale,
-      top: -1.72 * H * scale,
-      width: 2.4 * H * scale,
-      height: 2.0 * H * scale,
+      left: -1.1 * H * scale,
+      top: -1.35 * H * scale,
+      width: 2.2 * H * scale,
+      height: 1.55 * H * scale,
     }
   }
 
   impact(force: number): void {
-    this.squashVelocity += Math.min(1, force / 600) * 6
+    this.squashVelocity += Math.min(1, force / 600) * 5
   }
 
   private updateSquash(dt: number): void {
