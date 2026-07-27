@@ -184,11 +184,12 @@ export class CatRenderer {
     const shoulder: Vec = { x: H * 0.3, y: -r.shoulderY * H + crouch }
     // Neck/head off the shoulder.
     const spineA = Math.atan2(shoulder.y - hip.y, shoulder.x - hip.x)
-    const neck: Vec = { x: shoulder.x + H * 0.12, y: shoulder.y - H * 0.02 }
+    // Neck rises from the front of the chest; the head sits close above it.
+    const neck: Vec = { x: shoulder.x + H * 0.1, y: shoulder.y - H * 0.08 }
     const headBob = Math.abs(Math.sin(this.legPhase)) * H * 0.015 * r.gait
     const head: Vec = {
-      x: neck.x + Math.cos(-0.5 + r.headAngle) * H * 0.24 * r.headOut,
-      y: neck.y + Math.sin(-0.5 + r.headAngle) * H * 0.24 * r.headOut + headBob,
+      x: neck.x + Math.cos(-0.4 + r.headAngle) * H * 0.19 * r.headOut,
+      y: neck.y + Math.sin(-0.4 + r.headAngle) * H * 0.19 * r.headOut + headBob,
     }
 
     // --- feet (IK targets) ---
@@ -213,14 +214,14 @@ export class CatRenderer {
       return { x: fx, y: fy }
     }
     // Front legs hang from the shoulder, back legs from the hip; near/far offset.
-    const jFrontNear: Vec = { x: shoulder.x - H * 0.04, y: shoulder.y + H * 0.16 }
-    const jFrontFar: Vec = { x: shoulder.x + H * 0.02, y: shoulder.y + H * 0.16 }
-    const jBackNear: Vec = { x: hip.x + H * 0.04, y: hip.y + H * 0.16 }
-    const jBackFar: Vec = { x: hip.x - H * 0.02, y: hip.y + H * 0.16 }
-    const fFrontNear = foot(H * 0.34, 0)
-    const fFrontFar = foot(H * 0.34, 0.5)
-    const fBackNear = foot(-H * 0.26, 0.5)
-    const fBackFar = foot(-H * 0.26, 0)
+    const jFrontNear: Vec = { x: shoulder.x - H * 0.02, y: shoulder.y + H * 0.2 }
+    const jFrontFar: Vec = { x: shoulder.x + H * 0.04, y: shoulder.y + H * 0.2 }
+    const jBackNear: Vec = { x: hip.x + H * 0.06, y: hip.y + H * 0.2 }
+    const jBackFar: Vec = { x: hip.x, y: hip.y + H * 0.2 }
+    const fFrontNear = foot(H * 0.32, 0)
+    const fFrontFar = foot(H * 0.32, 0.5)
+    const fBackNear = foot(-H * 0.28, 0.5)
+    const fBackFar = foot(-H * 0.28, 0)
 
     // --- paint ---
     ctx.save()
@@ -244,26 +245,27 @@ export class CatRenderer {
   }
 
   private drawLeg(ctx: CanvasRenderingContext2D, J: Vec, F: Vec, color: string): void {
-    const l1 = H * 0.26, l2 = H * 0.28
+    const l1 = H * 0.24, l2 = H * 0.26
     // Front legs (positive x joints) bend their elbow back; hind legs bend forward.
     const bend = J.x > 0 ? 1 : -1
     const K = ik(J, F, l1, l2, bend)
     ctx.strokeStyle = color
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
-    ctx.lineWidth = H * 0.14
+    // Slim legs: a slightly fuller upper leg tapering to a thin shank.
+    ctx.lineWidth = H * 0.09
     ctx.beginPath()
     ctx.moveTo(J.x, J.y)
     ctx.lineTo(K.x, K.y)
     ctx.stroke()
-    ctx.lineWidth = H * 0.1
+    ctx.lineWidth = H * 0.07
     ctx.beginPath()
     ctx.moveTo(K.x, K.y)
     ctx.lineTo(F.x, F.y)
     ctx.stroke()
-    // Paw.
+    // A small paw.
     ctx.beginPath()
-    ctx.ellipse(F.x + H * 0.03, F.y - H * 0.02, H * 0.075, H * 0.055, 0, 0, Math.PI * 2)
+    ctx.ellipse(F.x + H * 0.02, F.y - H * 0.01, H * 0.05, H * 0.038, 0, 0, Math.PI * 2)
     ctx.fillStyle = color
     ctx.fill()
   }
@@ -303,131 +305,126 @@ export class CatRenderer {
   }
 
   private drawBody(ctx: CanvasRenderingContext2D, hip: Vec, shoulder: Vec, spineA: number, breath: number): void {
-    // Perpendicular (up) to the spine.
-    const nx = Math.sin(spineA), ny = -Math.cos(spineA)
-    const topR = H * (0.28 + breath)
-    const botR = H * 0.3
-    const rump = { x: hip.x - H * 0.06, y: hip.y }
-    const withr = (p: Vec, r: number) => ({ x: p.x + nx * r, y: p.y + ny * r })
+    const nx = Math.sin(spineA), ny = -Math.cos(spineA) // perpendicular, "up"
+    const dx = Math.cos(spineA), dy = Math.sin(spineA) // along spine, toward front
+    const thick = H * (0.5 + breath)
 
-    // Body outline: back (top) rump -> shoulder, chest down, belly back to rump.
-    const backRump = withr(rump, topR)
-    const backSh = withr(shoulder, topR * 0.95)
-    const chest = { x: shoulder.x + H * 0.16, y: shoulder.y + botR * 0.2 }
-    const bellyF = withr(shoulder, -botR)
-    const bellyB = withr(rump, -botR * 0.95)
+    // Torso: a rounded capsule along the spine — clean, no lumps.
+    ctx.strokeStyle = this.coat
+    ctx.lineCap = 'round'
+    ctx.lineWidth = thick
+    ctx.beginPath()
+    ctx.moveTo(hip.x - dx * H * 0.02, hip.y - dy * H * 0.02)
+    ctx.lineTo(shoulder.x + dx * H * 0.02, shoulder.y + dy * H * 0.02)
+    ctx.stroke()
 
+    // Fuller chest at the front and haunch at the back.
     ctx.fillStyle = this.coat
     ctx.beginPath()
-    ctx.moveTo(backRump.x, backRump.y)
-    ctx.quadraticCurveTo(hip.x + (shoulder.x - hip.x) * 0.5 + nx * topR * 1.15, hip.y + (shoulder.y - hip.y) * 0.5 + ny * topR * 1.15, backSh.x, backSh.y)
-    ctx.quadraticCurveTo(shoulder.x + H * 0.2, shoulder.y - H * 0.02, chest.x, chest.y)
-    ctx.quadraticCurveTo(shoulder.x + H * 0.12, shoulder.y + botR * 0.9, bellyF.x, bellyF.y)
-    ctx.quadraticCurveTo(hip.x + (shoulder.x - hip.x) * 0.5 - nx * botR * 1.05, hip.y + (shoulder.y - hip.y) * 0.5 - ny * botR * 1.05, bellyB.x, bellyB.y)
-    ctx.quadraticCurveTo(rump.x - H * 0.16, rump.y, backRump.x, backRump.y)
-    ctx.closePath()
+    ctx.ellipse(shoulder.x + dx * H * 0.05, shoulder.y + dy * H * 0.05 + H * 0.02, H * 0.2, H * 0.27, spineA, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.beginPath()
+    ctx.ellipse(hip.x - dx * H * 0.03, hip.y - dy * H * 0.03, H * 0.2, H * 0.26, spineA, 0, Math.PI * 2)
     ctx.fill()
 
-    // Cream belly patch.
+    // Cream belly/chest patch on the lower front.
     ctx.fillStyle = this.belly
     ctx.beginPath()
-    ctx.moveTo(chest.x - H * 0.04, chest.y + H * 0.02)
-    ctx.quadraticCurveTo(shoulder.x + H * 0.05, shoulder.y + botR * 0.85, bellyF.x - H * 0.02, bellyF.y - H * 0.02)
-    ctx.quadraticCurveTo(hip.x + (shoulder.x - hip.x) * 0.4 - nx * botR * 0.9, hip.y + (shoulder.y - hip.y) * 0.4 - ny * botR * 0.9, bellyB.x + H * 0.06, bellyB.y - H * 0.02)
-    ctx.quadraticCurveTo((chest.x + bellyB.x) / 2, (chest.y + bellyB.y) / 2 + H * 0.1, chest.x - H * 0.04, chest.y + H * 0.02)
-    ctx.closePath()
+    ctx.ellipse(shoulder.x - nx * H * 0.16 + dx * H * 0.02, shoulder.y - ny * H * 0.16 + dy * H * 0.02, H * 0.13, H * 0.2, spineA, 0, Math.PI * 2)
     ctx.fill()
 
-    // Tabby stripes across the back.
+    // Tabby stripes over the back (upper half only).
     ctx.strokeStyle = this.stripe
     ctx.lineCap = 'round'
-    ctx.lineWidth = H * 0.055
-    for (const f of [0.35, 0.5, 0.65, 0.8]) {
+    ctx.lineWidth = H * 0.05
+    for (const f of [0.32, 0.46, 0.6, 0.74]) {
       const bx = hip.x + (shoulder.x - hip.x) * f
       const by = hip.y + (shoulder.y - hip.y) * f
       ctx.beginPath()
-      ctx.moveTo(bx + nx * topR * 0.9, by + ny * topR * 0.9)
-      ctx.lineTo(bx + nx * topR * 0.3, by + ny * topR * 0.3)
+      ctx.moveTo(bx + nx * H * 0.24, by + ny * H * 0.24)
+      ctx.lineTo(bx + nx * H * 0.08, by + ny * H * 0.08)
       ctx.stroke()
     }
   }
 
   private drawHead(ctx: CanvasRenderingContext2D, neck: Vec, head: Vec): void {
     const r = this.rig
-    // Neck: a thick coat bridge so the head joins the body with no gap.
+
+    // Neck: a rounded coat bridge from the chest to the head.
     ctx.strokeStyle = this.coat
     ctx.lineCap = 'round'
-    ctx.lineWidth = H * 0.3
+    ctx.lineJoin = 'round'
+    ctx.lineWidth = H * 0.2
     ctx.beginPath()
-    ctx.moveTo(neck.x - H * 0.16, neck.y + H * 0.05)
-    ctx.lineTo(head.x - H * 0.03, head.y + H * 0.04)
+    ctx.moveTo(neck.x - H * 0.02, neck.y + H * 0.11)
+    ctx.lineTo(head.x - H * 0.07, head.y + H * 0.06)
     ctx.stroke()
 
-    // Ear (behind, on the crown).
-    const ang = Math.atan2(head.y - neck.y, head.x - neck.x)
+    // Ear (small triangle, upper-back of the head) with a pink inner.
     ctx.fillStyle = this.coat
-    const earBase = { x: head.x - Math.cos(ang) * H * 0.06, y: head.y + Math.sin(ang) * 0 - H * 0.16 }
     ctx.beginPath()
-    ctx.moveTo(earBase.x - H * 0.02, earBase.y + H * 0.08)
-    ctx.lineTo(earBase.x - H * 0.05, earBase.y - H * (0.16 + r.earPerk * 0.06))
-    ctx.lineTo(earBase.x + H * 0.13, earBase.y - H * 0.02)
+    ctx.moveTo(head.x - H * 0.11, head.y - H * 0.08)
+    ctx.lineTo(head.x - H * 0.05, head.y - H * (0.27 + r.earPerk * 0.06))
+    ctx.lineTo(head.x + H * 0.06, head.y - H * 0.11)
     ctx.closePath()
     ctx.fill()
     ctx.fillStyle = this.ear
     ctx.beginPath()
-    ctx.moveTo(earBase.x, earBase.y + H * 0.04)
-    ctx.lineTo(earBase.x - H * 0.02, earBase.y - H * 0.1)
-    ctx.lineTo(earBase.x + H * 0.08, earBase.y - H * 0.01)
+    ctx.moveTo(head.x - H * 0.075, head.y - H * 0.1)
+    ctx.lineTo(head.x - H * 0.04, head.y - H * 0.21)
+    ctx.lineTo(head.x + H * 0.02, head.y - H * 0.11)
     ctx.closePath()
     ctx.fill()
 
-    // Head + muzzle.
+    // Head + a soft rounded muzzle at the front.
     ctx.fillStyle = this.coat
     ctx.beginPath()
-    ctx.ellipse(head.x, head.y, H * 0.2, H * 0.185, 0, 0, Math.PI * 2)
+    ctx.ellipse(head.x, head.y, H * 0.185, H * 0.175, 0, 0, Math.PI * 2)
     ctx.fill()
-    // Muzzle wedge toward the front (+x).
     ctx.beginPath()
-    ctx.moveTo(head.x + H * 0.05, head.y - H * 0.09)
-    ctx.quadraticCurveTo(head.x + H * 0.3, head.y - H * 0.02, head.x + H * 0.26, head.y + H * 0.08)
-    ctx.quadraticCurveTo(head.x + H * 0.18, head.y + H * 0.16, head.x + H * 0.02, head.y + H * 0.12)
-    ctx.closePath()
+    ctx.ellipse(head.x + H * 0.15, head.y + H * 0.06, H * 0.11, H * 0.085, 0, 0, Math.PI * 2)
     ctx.fill()
 
-    // Nose.
+    // Nose + a short mouth line.
     ctx.fillStyle = this.dark
     ctx.beginPath()
-    ctx.moveTo(head.x + H * 0.24, head.y + H * 0.03)
-    ctx.lineTo(head.x + H * 0.29, head.y + H * 0.03)
-    ctx.lineTo(head.x + H * 0.265, head.y + H * 0.07)
+    ctx.moveTo(head.x + H * 0.22, head.y + H * 0.0)
+    ctx.lineTo(head.x + H * 0.27, head.y + H * 0.0)
+    ctx.lineTo(head.x + H * 0.245, head.y + H * 0.04)
     ctx.closePath()
     ctx.fill()
+    ctx.strokeStyle = this.dark
+    ctx.lineWidth = Math.max(0.8, H * 0.01)
+    ctx.beginPath()
+    ctx.moveTo(head.x + H * 0.245, head.y + H * 0.04)
+    ctx.lineTo(head.x + H * 0.245, head.y + H * 0.085)
+    ctx.stroke()
 
     // Eye.
     const open = Math.max(0.06, this.blinkAmount)
     ctx.save()
-    ctx.translate(head.x + H * 0.05, head.y - H * 0.02)
+    ctx.translate(head.x + H * 0.07, head.y - H * 0.03)
     ctx.scale(1, open)
     ctx.beginPath()
-    ctx.ellipse(0, 0, H * 0.035, H * 0.05, 0, 0, Math.PI * 2)
+    ctx.ellipse(0, 0, H * 0.032, H * 0.044, 0, 0, Math.PI * 2)
     ctx.fillStyle = this.dark
     ctx.fill()
     if (open > 0.4) {
       ctx.beginPath()
-      ctx.ellipse(H * 0.012, -H * 0.016, H * 0.012, H * 0.014, 0, 0, Math.PI * 2)
+      ctx.ellipse(H * 0.011, -H * 0.015, H * 0.011, H * 0.013, 0, 0, Math.PI * 2)
       ctx.fillStyle = '#ffffff'
       ctx.fill()
     }
     ctx.restore()
 
-    // Whiskers.
+    // Whiskers (short).
     ctx.strokeStyle = this.dark
-    ctx.globalAlpha = 0.55
+    ctx.globalAlpha = 0.5
     ctx.lineWidth = Math.max(0.8, H * 0.008)
-    for (const dy of [-0.02, 0.01, 0.04]) {
+    for (const dy of [-0.01, 0.02, 0.05]) {
       ctx.beginPath()
-      ctx.moveTo(head.x + H * 0.22, head.y + H * (0.04 + dy))
-      ctx.lineTo(head.x + H * 0.5, head.y + H * (0.02 + dy * 2))
+      ctx.moveTo(head.x + H * 0.2, head.y + H * (0.03 + dy))
+      ctx.lineTo(head.x + H * 0.42, head.y + H * (0.0 + dy * 1.8))
       ctx.stroke()
     }
     ctx.globalAlpha = 1
