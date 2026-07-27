@@ -100,11 +100,21 @@ function css(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`
 }
 
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number, fill: string): void {
-  ctx.beginPath()
-  ctx.roundRect(x, y, w, h, r)
-  ctx.fillStyle = fill
-  ctx.fill()
+/** Shade helpers on packed 0xRRGGBB, for deriving highlight/shadow tones per pet. */
+function lighten(color: number, amount: number): number {
+  const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
+  const m = (c: number) => Math.round(c + (255 - c) * amount)
+  return (m(r) << 16) | (m(g) << 8) | m(b)
+}
+
+function darken(color: number, amount: number): number {
+  const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
+  const m = (c: number) => Math.round(c * (1 - amount))
+  return (m(r) << 16) | (m(g) << 8) | m(b)
+}
+
+function rgba(color: number, alpha: number): string {
+  return `rgba(${(color >> 16) & 0xff}, ${(color >> 8) & 0xff}, ${color & 0xff}, ${alpha})`
 }
 
 function ellipse(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number, fill: string): void {
@@ -124,9 +134,22 @@ function poly(ctx: CanvasRenderingContext2D, pts: number[], fill: string): void 
 }
 
 export class CatRenderer {
+  // Base tones plus derived highlight/shadow shades, so the body reads as a
+  // rounded volume instead of a flat fill — all keyed off the pet's own palette.
   private coat: string
+  private coatHi: string
+  private coatLo: string
   private belly: string
-  private accent: string
+  private bellyHi: string
+  private stripe: string
+  private mouth: string
+  // Face features. The iris/nose/inner-ear are warm constants; everything else
+  // is per-pet, so cats stay individually coloured but share a friendly face.
+  private readonly innerEar = '#d9a0a0'
+  private readonly nose = '#d98a8a'
+  private readonly noseHi = '#f4cccc'
+  private readonly eyeIris = '#c99a3c'
+  private readonly eyePupil = '#241c1a'
 
   private pose: Pose = { ...REST }
   private legPhase = 0
@@ -145,8 +168,12 @@ export class CatRenderer {
 
   constructor(palette: { coat: number; belly: number; accent: number }) {
     this.coat = css(palette.coat)
+    this.coatHi = css(lighten(palette.coat, 0.24))
+    this.coatLo = css(darken(palette.coat, 0.16))
     this.belly = css(palette.belly)
-    this.accent = css(palette.accent)
+    this.bellyHi = css(lighten(palette.belly, 0.22))
+    this.mouth = css(darken(palette.coat, 0.34))
+    this.stripe = rgba(darken(palette.coat, 0.34), 0.26)
   }
 
   /**
@@ -191,6 +218,22 @@ export class CatRenderer {
     const breath = Math.sin(this.time * breathRate) * (this.anim === 'sleep' ? 0.05 : 0.022)
     const bob = p.legSwing > 0.05 ? Math.abs(Math.sin(this.legPhase)) * H * 0.02 : 0
 
+    // A soft contact shadow grounds the pet. Skipped while airborne or climbing,
+    // where there is nothing directly beneath its feet.
+    if (this.anim !== 'climb' && this.anim !== 'jump' && this.anim !== 'fall') {
+      ctx.save()
+      ctx.scale(this.scale, this.scale)
+      const sw = H * 0.46
+      const g = ctx.createRadialGradient(0, -H * 0.01, 0, 0, -H * 0.01, sw)
+      g.addColorStop(0, 'rgba(0,0,0,0.22)')
+      g.addColorStop(1, 'rgba(0,0,0,0)')
+      ctx.beginPath()
+      ctx.ellipse(0, -H * 0.01, sw, H * 0.1, 0, 0, Math.PI * 2)
+      ctx.fillStyle = g
+      ctx.fill()
+      ctx.restore()
+    }
+
     ctx.save()
     if (this.anim === 'climb') {
       // Cling to a vertical wall, head up, belly and paws toward the wall. `facing`
@@ -232,7 +275,29 @@ export class CatRenderer {
       const curl = i === 0 ? p.tailBase - this.speed * 0.0012 : 0.17
       ctx.rotate(curl + wag)
       const width = H * 0.095 * (1 - i * 0.11)
-      roundRect(ctx, -width / 2, -TAIL_LEN, width, TAIL_LEN + width / 2, width / 2, i === TAIL_SEGMENTS - 1 ? this.belly : this.coat)
+      const last = i === TAIL_SEGMENTS - 1
+      // A left-to-right gradient across the width gives the tail a rounded,
+      // cylindrical read; the tip fades to the pale belly tone.
+      const g = ctx.createLinearGradient(-width / 2, 0, width / 2, 0)
+      if (last) {
+        g.addColorStop(0, this.belly)
+        g.addColorStop(1, this.bellyHi)
+      } else {
+        g.addColorStop(0, this.coatLo)
+        g.addColorStop(0.5, this.coat)
+        g.addColorStop(1, this.coatHi)
+      }
+      ctx.beginPath()
+      ctx.roundRect(-width / 2, -TAIL_LEN, width, TAIL_LEN + width / 2, width / 2)
+      ctx.fillStyle = g
+      ctx.fill()
+      // Faint tabby rings on alternate joints.
+      if (!last && i % 2 === 1) {
+        ctx.beginPath()
+        ctx.roundRect(-width / 2, -TAIL_LEN, width, TAIL_LEN * 0.34, width / 2)
+        ctx.fillStyle = this.stripe
+        ctx.fill()
+      }
     }
     ctx.restore()
   }
@@ -247,7 +312,23 @@ export class CatRenderer {
       ctx.save()
       ctx.translate(xs[i]!, -H * 0.19 + p.bodyY * 0.35)
       ctx.rotate(Math.sin(this.legPhase + offset) * p.legSwing)
-      roundRect(ctx, -H * 0.045, 0, H * 0.09, H * 0.19, H * 0.045, this.coat)
+      const g = ctx.createLinearGradient(-H * 0.045, 0, H * 0.045, 0)
+      g.addColorStop(0, this.coatLo)
+      g.addColorStop(0.55, this.coat)
+      g.addColorStop(1, this.coatHi)
+      ctx.beginPath()
+      ctx.roundRect(-H * 0.045, 0, H * 0.09, H * 0.19, H * 0.045)
+      ctx.fillStyle = g
+      ctx.fill()
+      // A single toe crease at the paw reads as a little foot.
+      ctx.strokeStyle = this.coatLo
+      ctx.globalAlpha = 0.5
+      ctx.lineWidth = Math.max(0.6, H * 0.008)
+      ctx.beginPath()
+      ctx.moveTo(0, H * 0.165)
+      ctx.lineTo(0, H * 0.19)
+      ctx.stroke()
+      ctx.globalAlpha = 1
       ctx.restore()
     }
   }
@@ -258,8 +339,46 @@ export class CatRenderer {
     ctx.translate(0, -H * 0.38 + p.bodyY - bob)
     ctx.rotate(p.bodyRot + (this.anim === 'dance' ? Math.sin(this.time * 6) * 0.12 : 0))
     ctx.scale(p.bodyScaleX * (1 - this.squash * 0.35), (p.bodyScaleY + breath) * (1 + this.squash * 0.45))
-    ellipse(ctx, 0, 0, H * 0.36, H * 0.23, this.coat)
-    ellipse(ctx, H * 0.04, H * 0.09, H * 0.26, H * 0.12, this.belly)
+
+    // Coat: top-lit vertical gradient for volume.
+    const g = ctx.createLinearGradient(0, -H * 0.23, 0, H * 0.23)
+    g.addColorStop(0, this.coatHi)
+    g.addColorStop(0.55, this.coat)
+    g.addColorStop(1, this.coatLo)
+    ctx.beginPath()
+    ctx.ellipse(0, 0, H * 0.36, H * 0.23, 0, 0, Math.PI * 2)
+    ctx.fillStyle = g
+    ctx.fill()
+
+    // Tabby stripes down the back, clipped to the body so they never spill out.
+    ctx.save()
+    ctx.beginPath()
+    ctx.ellipse(0, 0, H * 0.36, H * 0.23, 0, 0, Math.PI * 2)
+    ctx.clip()
+    ctx.strokeStyle = this.stripe
+    ctx.lineWidth = H * 0.035
+    for (const bx of [-0.2, -0.06, 0.08, 0.2]) {
+      ctx.beginPath()
+      ctx.moveTo(H * bx, -H * 0.24)
+      ctx.quadraticCurveTo(H * (bx + 0.04), 0, H * bx, H * 0.2)
+      ctx.stroke()
+    }
+    ctx.restore()
+
+    // Belly patch with its own soft gradient.
+    const bg = ctx.createLinearGradient(0, -H * 0.02, 0, H * 0.21)
+    bg.addColorStop(0, this.bellyHi)
+    bg.addColorStop(1, this.belly)
+    ctx.beginPath()
+    ctx.ellipse(H * 0.04, H * 0.09, H * 0.26, H * 0.12, 0, 0, Math.PI * 2)
+    ctx.fillStyle = bg
+    ctx.fill()
+
+    // A faint top highlight sells the roundness.
+    ctx.globalAlpha = 0.16
+    ellipse(ctx, -H * 0.06, -H * 0.14, H * 0.2, H * 0.07, this.coatHi)
+    ctx.globalAlpha = 1
+
     ctx.restore()
   }
 
@@ -270,7 +389,14 @@ export class CatRenderer {
     ctx.save()
     ctx.translate(H * 0.21, -H * 0.34 - pawUp * H * 0.08)
     ctx.rotate(-pawUp * 1.1 + wave * pawUp)
-    roundRect(ctx, -H * 0.045, 0, H * 0.09, H * 0.2, H * 0.045, this.coat)
+    const g = ctx.createLinearGradient(-H * 0.045, 0, H * 0.045, 0)
+    g.addColorStop(0, this.coatLo)
+    g.addColorStop(0.55, this.coat)
+    g.addColorStop(1, this.coatHi)
+    ctx.beginPath()
+    ctx.roundRect(-H * 0.045, 0, H * 0.09, H * 0.2, H * 0.045)
+    ctx.fillStyle = g
+    ctx.fill()
     ctx.restore()
   }
 
@@ -286,32 +412,67 @@ export class CatRenderer {
       ctx.translate(side * H * 0.11, -H * 0.13)
       ctx.rotate(side * p.earPerk * 0.5)
       poly(ctx, [0, 0, side * H * 0.13, -H * 0.15, side * H * 0.17, H * 0.03], this.coat)
-      poly(ctx, [side * 0.02 * H, -H * 0.01, side * H * 0.11, -H * 0.11, side * H * 0.13, 0], this.accent)
+      poly(ctx, [side * 0.02 * H, -H * 0.01, side * H * 0.11, -H * 0.11, side * H * 0.13, 0], this.innerEar)
       ctx.restore()
     }
 
-    ellipse(ctx, 0, 0, H * 0.22, H * 0.22, this.coat)
+    // Head as a top-lit sphere.
+    const hg = ctx.createRadialGradient(-H * 0.07, -H * 0.09, H * 0.02, 0, 0, H * 0.24)
+    hg.addColorStop(0, this.coatHi)
+    hg.addColorStop(0.65, this.coat)
+    hg.addColorStop(1, this.coatLo)
+    ctx.beginPath()
+    ctx.ellipse(0, 0, H * 0.22, H * 0.22, 0, 0, Math.PI * 2)
+    ctx.fillStyle = hg
+    ctx.fill()
 
+    // A pale muzzle defines the snout.
+    ctx.globalAlpha = 0.45
+    ellipse(ctx, H * 0.07, H * 0.07, H * 0.13, H * 0.095, this.bellyHi)
+    ctx.globalAlpha = 1
+
+    // Eyes: dark almond, amber iris, vertical slit pupil, two catchlights.
     for (const side of [-1, 1] as const) {
       ctx.save()
       ctx.translate(H * 0.055 + side * H * 0.075, -H * 0.02)
       ctx.scale(1, Math.max(0.08, this.blinkAmount))
-      ellipse(ctx, 0, 0, H * 0.035, H * 0.05, this.accent)
-      // Catchlight — tiny, but it is most of what makes a face feel alive.
-      ellipse(ctx, H * 0.014, -H * 0.018, H * 0.014, H * 0.014, '#ffffff')
+      ellipse(ctx, 0, 0, H * 0.046, H * 0.058, this.mouth)
+      ellipse(ctx, 0, 0, H * 0.037, H * 0.05, this.eyeIris)
+      ellipse(ctx, 0, 0, H * 0.013, H * 0.048, this.eyePupil)
+      ellipse(ctx, H * 0.016, -H * 0.02, H * 0.013, H * 0.013, '#ffffff')
+      ctx.globalAlpha = 0.5
+      ellipse(ctx, -H * 0.012, H * 0.018, H * 0.007, H * 0.007, '#ffffff')
+      ctx.globalAlpha = 1
       ctx.restore()
     }
 
-    poly(ctx, [H * 0.17, H * 0.05, H * 0.23, H * 0.05, H * 0.2, H * 0.09], this.accent)
+    // Nose with a tiny highlight.
+    poly(ctx, [H * 0.17, H * 0.05, H * 0.23, H * 0.05, H * 0.2, H * 0.09], this.nose)
+    ellipse(ctx, H * 0.192, H * 0.056, H * 0.012, H * 0.008, this.noseHi)
 
+    // A small ω-shaped mouth under the nose.
+    ctx.strokeStyle = this.mouth
+    ctx.lineWidth = Math.max(0.8, H * 0.01)
+    ctx.globalAlpha = 0.6
+    ctx.beginPath()
+    ctx.moveTo(H * 0.2, H * 0.09)
+    ctx.lineTo(H * 0.2, H * 0.115)
+    ctx.moveTo(H * 0.2, H * 0.115)
+    ctx.quadraticCurveTo(H * 0.16, H * 0.132, H * 0.13, H * 0.105)
+    ctx.moveTo(H * 0.2, H * 0.115)
+    ctx.quadraticCurveTo(H * 0.24, H * 0.132, H * 0.27, H * 0.105)
+    ctx.stroke()
+    ctx.globalAlpha = 1
+
+    // Whiskers — pale and fine.
     ctx.beginPath()
     for (const dy of [-0.02, 0.01, 0.04]) {
-      ctx.moveTo(H * 0.19, H * (0.05 + dy))
-      ctx.lineTo(H * 0.42, H * (0.03 + dy * 2.2))
+      ctx.moveTo(H * 0.2, H * (0.06 + dy))
+      ctx.lineTo(H * 0.44, H * (0.03 + dy * 2.4))
     }
-    ctx.lineWidth = Math.max(1, H * 0.012)
-    ctx.strokeStyle = this.accent
-    ctx.globalAlpha = 0.55
+    ctx.lineWidth = Math.max(0.8, H * 0.01)
+    ctx.strokeStyle = '#ffffff'
+    ctx.globalAlpha = 0.5
     ctx.stroke()
     ctx.globalAlpha = 1
 
