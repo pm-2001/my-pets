@@ -7,13 +7,17 @@ import { PET_HEIGHT } from '../brain/pet'
  * Everything is drawn immediate-mode each frame — no image assets — so each pet
  * keeps its own seeded coat colour (with a matching darker outline) while sharing
  * one friendly face. The behaviour engine is untouched: `update()` advances a
- * lerped `Pose`, `draw()` renders it. The cat faces the viewer, so locomotion
- * reads as a little hop/waddle rather than a side-on stride, and `facing` only
- * sways the tail and leans the body the way it is heading.
+ * lerped `Pose`, `draw()` renders it.
+ *
+ * Posture follows movement. Standing still, the cat *sits* — belly to the ground,
+ * two front paws, tail curled. To walk it *stands up on four legs* that step in
+ * diagonal pairs, and sits back down when it stops; a `stand` value blends
+ * smoothly between the two. Squash-and-stretch is kept gentle so it never
+ * flattens into a pancake.
  *
  * Outlines use a "stroke behind" trick: fill the whole silhouette first, then
  * stroke it again with `destination-over` so only the outer rim shows — a single
- * clean outline with no seams where head, body and ears overlap.
+ * clean outline with no seams where head, body, legs and ears overlap.
  */
 
 interface Pose {
@@ -56,23 +60,23 @@ const REST: Pose = {
 
 const POSES: Record<AnimState, Partial<Pose>> = {
   idle: {},
-  look: { earPerk: 0.4, headRot: 0, tailWag: 0.14, tailRate: 2.2 },
-  walk: { legSwing: 0.5, legRate: 9, tailWag: 0.18, tailRate: 5, earPerk: 0.1 },
-  run: { legSwing: 0.9, legRate: 16, tailWag: 0.24, tailRate: 9, earPerk: 0.2 },
-  sit: { bodyY: 4, bodyScaleY: 0.97, tailWag: 0.08, tailRate: 1.1 },
-  sleep: { bodyY: 12, bodyScaleY: 0.8, bodyScaleX: 1.12, eyeOpen: 0, earPerk: -0.35, tailWag: 0.03, tailRate: 0.5 },
-  jump: { bodyScaleY: 1.14, bodyScaleX: 0.9, earPerk: 0.5, frontPaw: 0.5, tailWag: 0.2 },
-  fall: { bodyScaleY: 1.08, bodyScaleX: 0.94, earPerk: 0.55, frontPaw: 0.3 },
-  stretch: { bodyY: -3, bodyScaleY: 1.12, bodyScaleX: 0.94, eyeOpen: 0.3, earPerk: 0.2 },
+  look: { earPerk: 0.4, tailWag: 0.14, tailRate: 2.2 },
+  walk: { legRate: 9, tailWag: 0.18, tailRate: 5, earPerk: 0.1 },
+  run: { legRate: 17, tailWag: 0.24, tailRate: 9, earPerk: 0.2 },
+  sit: { bodyY: 3, tailWag: 0.08, tailRate: 1.1 },
+  // Lowers and closes its eyes — a gentle settle, not a flattening.
+  sleep: { bodyY: 7, bodyScaleY: 0.95, eyeOpen: 0, earPerk: -0.3, tailWag: 0.03, tailRate: 0.5 },
+  jump: { bodyScaleY: 1.08, bodyScaleX: 0.95, earPerk: 0.5, frontPaw: 0.35, tailWag: 0.2 },
+  fall: { bodyScaleY: 1.05, bodyScaleX: 0.97, earPerk: 0.55, frontPaw: 0.2 },
+  stretch: { bodyY: -2, bodyScaleY: 1.08, bodyScaleX: 0.96, eyeOpen: 0.3, earPerk: 0.2 },
   dance: { earPerk: 0.5, tailWag: 0.5, tailRate: 12, headRot: 0.14 },
   celebrate: { earPerk: 0.85, tailWag: 0.45, tailRate: 11, frontPaw: 1, eyeOpen: 1 },
   scratch: { frontPaw: 1, earPerk: 0.3, tailWag: 0.2, tailRate: 4 },
-  climb: { frontPaw: 1, earPerk: 0.3, bodyScaleY: 1.06, tailWag: 0.08 },
+  climb: { frontPaw: 1, earPerk: 0.3, tailWag: 0.08 },
 }
 
 const H = PET_HEIGHT
 
-/** 0xRRGGBB (how palettes are stored) to a Canvas2D fill string. */
 function css(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`
 }
@@ -94,6 +98,15 @@ function ellipsePath(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: 
   ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
 }
 
+interface Leg {
+  x: number
+  /** Y the leg attaches under the body. */
+  topY: number
+  /** How far the paw is lifted off the ground this frame. */
+  lift: number
+  front: boolean
+}
+
 export class CatRenderer {
   private coat: string
   private coatHi: string
@@ -112,17 +125,25 @@ export class CatRenderer {
   private squash = 0
   private squashVelocity = 0
   private time = 0
+  /** 0 sitting, 1 standing on all fours; blends with movement. */
+  private stand = 0
 
   private anim: AnimState = 'idle'
   private facing: 1 | -1 = 1
   private scale = 1
+
+  // Per-frame posture, computed once in drawCat and read by the draw passes.
+  private bodyCY = 0
+  private bodyRx = 0
+  private bodyRy = 0
+  private headCY = 0
+  private legs: Leg[] = []
 
   constructor(palette: { coat: number; belly: number; accent: number }) {
     this.coat = css(palette.coat)
     this.coatHi = css(lighten(palette.coat, 0.2))
     this.coatLo = css(darken(palette.coat, 0.13))
     this.outline = css(darken(palette.coat, 0.55))
-    // A near-white belly with just a hint of the coat's hue.
     this.belly = css(lighten(palette.coat, 0.82))
   }
 
@@ -138,28 +159,31 @@ export class CatRenderer {
       this.pose[key] += (target[key] - this.pose[key]) * k
     }
 
+    // Stand up to walk/run, sit back down otherwise.
+    const wantStand = anim === 'walk' || anim === 'run' ? 1 : 0
+    this.stand += (wantStand - this.stand) * (1 - Math.exp(-9 * dt))
+
     this.updateBlink(dt, target.eyeOpen)
     this.updateSquash(dt)
 
     const rate = this.pose.legRate > 0 ? this.pose.legRate : 0
-    this.legPhase += (rate + Math.abs(speed) * 0.04) * dt
+    this.legPhase += (rate + Math.abs(speed) * 0.05) * dt
   }
 
   /** Draw the pet with its feet at the current context origin. */
   draw(ctx: CanvasRenderingContext2D): void {
     const p = this.pose
     const sleeping = this.anim === 'sleep'
-    const breath = Math.sin(this.time * (sleeping ? 1.1 : 2.4)) * (sleeping ? 0.03 : 0.016)
-    const walking = this.anim === 'walk' || this.anim === 'run'
+    const breath = Math.sin(this.time * (sleeping ? 1.1 : 2.4)) * (sleeping ? 0.028 : 0.014)
     const airborne = this.anim === 'jump' || this.anim === 'fall'
-    const bob = walking ? Math.abs(Math.sin(this.legPhase)) * H * 0.03 : 0
-    const lean = walking ? this.facing * 0.05 : this.anim === 'dance' ? Math.sin(this.time * 6) * 0.12 : 0
+    // Body bobs as it strides.
+    const bob = Math.abs(Math.sin(this.legPhase)) * H * 0.03 * this.stand
+    const lean = this.stand * this.facing * 0.05 + (this.anim === 'dance' ? Math.sin(this.time * 6) * 0.12 : 0)
 
-    // Contact shadow, unless there is nothing beneath the feet.
     if (!airborne && this.anim !== 'climb') {
       ctx.save()
       ctx.scale(this.scale, this.scale)
-      const sw = H * 0.44
+      const sw = H * (0.44 - 0.06 * this.stand)
       const g = ctx.createRadialGradient(0, -H * 0.01, 0, 0, -H * 0.01, sw)
       g.addColorStop(0, 'rgba(0,0,0,0.2)')
       g.addColorStop(1, 'rgba(0,0,0,0)')
@@ -172,9 +196,9 @@ export class CatRenderer {
     ctx.save()
     ctx.scale(this.scale, this.scale)
     ctx.translate(0, -bob + p.bodyY)
-    // Squash/stretch + breathing about the belly, pivoting on the feet.
-    const sx = p.bodyScaleX * (1 - this.squash * 0.26)
-    const sy = (p.bodyScaleY + breath) * (1 + this.squash * 0.36)
+    // Keep squash/stretch subtle so the cat never flattens into a pancake.
+    const sx = p.bodyScaleX * (1 - this.squash * 0.16)
+    const sy = (p.bodyScaleY + breath) * (1 + this.squash * 0.22)
     ctx.scale(sx, sy)
     ctx.rotate(lean)
 
@@ -185,7 +209,30 @@ export class CatRenderer {
   }
 
   private drawCat(ctx: CanvasRenderingContext2D): void {
-    // 1) fills, 2) shading + belly, 3) outline behind, 4) face on top.
+    const stand = this.stand
+    // Standing lifts and narrows the body so all four legs show beneath and
+    // beside it; the hind pair sits just outside the body's edge.
+    this.bodyCY = -H * (0.42 + 0.17 * stand)
+    this.bodyRx = H * (0.36 - 0.05 * stand)
+    this.bodyRy = H * (0.42 - 0.13 * stand)
+    this.headCY = -H * (0.95 + 0.08 * stand)
+
+    // Four legs, stepping in diagonal pairs (front-left with hind-right).
+    const amp = H * 0.08 * stand
+    const sF = Math.max(0, Math.sin(this.legPhase))
+    const sB = Math.max(0, Math.sin(this.legPhase + Math.PI))
+    const bodyBottom = this.bodyCY + this.bodyRy
+    // Front paws keep a small presence even when sitting; hind legs only emerge
+    // as the cat stands (they hide behind the wider sitting body).
+    const frontTop = Math.min(-H * 0.14, bodyBottom + H * 0.04)
+    const hindTop = bodyBottom - H * 0.02
+    this.legs = [
+      { x: -H * 0.33, topY: hindTop, lift: sB * amp, front: false },
+      { x: H * 0.33, topY: hindTop, lift: sF * amp, front: false },
+      { x: -H * 0.13, topY: frontTop, lift: sF * amp, front: true },
+      { x: H * 0.13, topY: frontTop, lift: sB * amp, front: true },
+    ]
+
     this.silhouette(ctx, 'fill')
     this.shade(ctx)
     ctx.save()
@@ -195,7 +242,6 @@ export class CatRenderer {
     this.face(ctx)
   }
 
-  /** The outer body: tail, sitting body, front legs, head, ears. */
   private silhouette(ctx: CanvasRenderingContext2D, mode: 'fill' | 'stroke'): void {
     const p = this.pose
     const line = Math.max(1.5, H * 0.055)
@@ -204,7 +250,6 @@ export class CatRenderer {
     ctx.lineCap = 'round'
     ctx.lineWidth = line
     ctx.strokeStyle = this.outline
-
     const paint = (fill: string) => {
       if (stroke) ctx.stroke()
       else {
@@ -213,12 +258,23 @@ export class CatRenderer {
       }
     }
 
-    // --- tail: trails to the side away from travel, with a curl ---
+    const leg = (l: Leg) => {
+      const w = l.front ? H * 0.14 : H * 0.13
+      const bottom = -l.lift
+      if (bottom - l.topY < H * 0.02) return
+      ctx.beginPath()
+      ctx.roundRect(l.x - w / 2, l.topY, w, bottom - l.topY, w * 0.5)
+      // Hind legs are a shade darker so they read as further back.
+      paint(l.front ? this.coat : this.coatLo)
+    }
+
+    // --- tail: curled beside a sitting cat, raised up and back when it stands
+    // to walk so it clears the hind legs ---
     const tSide = -this.facing
     const wag = Math.sin(this.time * p.tailRate) * p.tailWag
     ctx.save()
-    ctx.translate(tSide * H * 0.26, -H * 0.16)
-    ctx.rotate(tSide * (0.2 + wag))
+    ctx.translate(tSide * H * (0.26 - 0.06 * this.stand), -H * (0.16 + 0.28 * this.stand))
+    ctx.rotate(tSide * (0.2 - 0.5 * this.stand + wag))
     ctx.beginPath()
     ctx.moveTo(0, 0)
     ctx.quadraticCurveTo(tSide * H * 0.44, -H * 0.02, tSide * H * 0.5, -H * 0.34)
@@ -236,74 +292,74 @@ export class CatRenderer {
     }
     ctx.restore()
 
-    // --- body (sitting oval) ---
-    ellipsePath(ctx, 0, -H * 0.42, H * 0.36, H * 0.42)
+    // --- hind legs (behind the body) ---
+    for (const l of this.legs) if (!l.front) leg(l)
+
+    // --- body ---
+    ellipsePath(ctx, 0, this.bodyCY, this.bodyRx, this.bodyRy)
     paint(this.coat)
 
-    // --- front legs / paws ---
-    for (const side of [-1, 1] as const) {
-      ctx.beginPath()
-      ctx.roundRect(side * H * 0.23 - H * 0.085, -H * 0.32, H * 0.17, H * 0.34, H * 0.085)
-      paint(this.coat)
-    }
+    // --- front legs (in front of the body) ---
+    for (const l of this.legs) if (l.front) leg(l)
 
     // --- head ---
-    ellipsePath(ctx, 0, -H * 0.95, H * 0.46, H * 0.42)
+    ellipsePath(ctx, 0, this.headCY, H * 0.46, H * 0.42)
     paint(this.coat)
 
     // --- ears ---
+    const eTop = this.headCY - H * 0.23
     for (const side of [-1, 1] as const) {
       const perk = p.earPerk * 0.12
       ctx.beginPath()
-      ctx.moveTo(side * (H * 0.44), -H * (1.18 + perk))
-      ctx.quadraticCurveTo(side * H * 0.28, -H * (1.5 + perk), side * H * 0.12, -H * (1.28 + perk * 0.4))
-      ctx.quadraticCurveTo(side * H * 0.3, -H * 1.16, side * (H * 0.44), -H * (1.18 + perk))
+      ctx.moveTo(side * H * 0.44, eTop + H * (0.05 - perk))
+      ctx.quadraticCurveTo(side * H * 0.28, eTop - H * (0.27 + perk), side * H * 0.12, eTop - H * (0.05 + perk * 0.4))
+      ctx.quadraticCurveTo(side * H * 0.3, eTop + H * 0.07, side * H * 0.44, eTop + H * (0.05 - perk))
       ctx.closePath()
       paint(this.coat)
     }
   }
 
-  /** Soft coat shading and the white belly patch. */
   private shade(ctx: CanvasRenderingContext2D): void {
     // Head highlight (light from upper-left).
     ctx.globalAlpha = 0.5
-    ellipsePath(ctx, -H * 0.16, -H * 1.06, H * 0.16, H * 0.2)
+    ellipsePath(ctx, -H * 0.16, this.headCY - H * 0.11, H * 0.16, H * 0.2)
     ctx.fillStyle = this.coatHi
     ctx.fill()
-    // A little shadow where the head meets the body, and along the right.
-    ctx.globalAlpha = 0.28
-    ellipsePath(ctx, H * 0.14, -H * 0.42, H * 0.24, H * 0.4)
+    // Soft shadow on the lower-right of the body.
+    ctx.globalAlpha = 0.26
+    ellipsePath(ctx, H * 0.13, this.bodyCY + H * 0.02, this.bodyRx * 0.7, this.bodyRy * 0.9)
     ctx.fillStyle = this.coatLo
     ctx.fill()
     ctx.globalAlpha = 1
 
-    // White belly bib (chest to between the paws).
+    // White belly bib (chest down the front).
+    const top = this.bodyCY - this.bodyRy * 0.72
     ctx.beginPath()
-    ctx.moveTo(0, -H * 0.74)
-    ctx.quadraticCurveTo(H * 0.26, -H * 0.6, H * 0.2, -H * 0.28)
-    ctx.quadraticCurveTo(H * 0.13, -H * 0.02, 0, -H * 0.02)
-    ctx.quadraticCurveTo(-H * 0.13, -H * 0.02, -H * 0.2, -H * 0.28)
-    ctx.quadraticCurveTo(-H * 0.26, -H * 0.6, 0, -H * 0.74)
+    ctx.moveTo(0, top)
+    ctx.quadraticCurveTo(H * 0.24, this.bodyCY - H * 0.16, H * 0.18, this.bodyCY + this.bodyRy * 0.62)
+    ctx.quadraticCurveTo(H * 0.1, this.bodyCY + this.bodyRy, 0, this.bodyCY + this.bodyRy)
+    ctx.quadraticCurveTo(-H * 0.1, this.bodyCY + this.bodyRy, -H * 0.18, this.bodyCY + this.bodyRy * 0.62)
+    ctx.quadraticCurveTo(-H * 0.24, this.bodyCY - H * 0.16, 0, top)
     ctx.fillStyle = this.belly
     ctx.fill()
 
     // Inner ears (pink).
+    const eTop = this.headCY - H * 0.23
     for (const side of [-1, 1] as const) {
       const perk = this.pose.earPerk * 0.12
       ctx.beginPath()
-      ctx.moveTo(side * H * 0.38, -H * (1.19 + perk))
-      ctx.quadraticCurveTo(side * H * 0.27, -H * (1.42 + perk), side * H * 0.16, -H * (1.26 + perk * 0.4))
-      ctx.quadraticCurveTo(side * H * 0.29, -H * 1.18, side * H * 0.38, -H * (1.19 + perk))
+      ctx.moveTo(side * H * 0.38, eTop + H * (0.04 - perk))
+      ctx.quadraticCurveTo(side * H * 0.27, eTop - H * (0.19 + perk), side * H * 0.16, eTop - H * (0.03 + perk * 0.4))
+      ctx.quadraticCurveTo(side * H * 0.29, eTop + H * 0.05, side * H * 0.38, eTop + H * (0.04 - perk))
       ctx.closePath()
       ctx.fillStyle = this.pink
       ctx.fill()
     }
   }
 
-  /** Eyes, blush, nose, mouth, whiskers, toe lines. */
   private face(ctx: CanvasRenderingContext2D): void {
     const open = Math.max(0.06, this.blinkAmount)
-    const cy = -H * 0.95
+    const cy = this.headCY
 
     // Blush cheeks.
     for (const side of [-1, 1] as const) {
@@ -312,7 +368,7 @@ export class CatRenderer {
       ctx.fill()
     }
 
-    // Eyes: big glossy black with two catchlights; a happy arc when asleep.
+    // Eyes: big glossy black with catchlights; happy arcs when asleep.
     for (const side of [-1, 1] as const) {
       const ex = side * H * 0.17
       if (open < 0.25) {
@@ -339,7 +395,7 @@ export class CatRenderer {
       }
     }
 
-    // Nose + mouth (ω).
+    // Nose + ω mouth.
     ctx.beginPath()
     ctx.moveTo(-H * 0.035, cy + H * 0.14)
     ctx.quadraticCurveTo(0, cy + H * 0.19, H * 0.035, cy + H * 0.14)
@@ -373,16 +429,16 @@ export class CatRenderer {
     }
     ctx.globalAlpha = 1
 
-    // Toe lines on the front paws (hidden when the paws are raised).
-    if (this.pose.frontPaw < 0.2) {
-      ctx.lineWidth = Math.max(0.8, H * 0.014)
-      for (const side of [-1, 1] as const) {
-        for (const t of [-0.045, 0, 0.045]) {
-          ctx.beginPath()
-          ctx.moveTo(side * H * 0.23 + H * t, -H * 0.05)
-          ctx.lineTo(side * H * 0.23 + H * t, -H * 0.01)
-          ctx.stroke()
-        }
+    // Toe lines on paws that are planted.
+    ctx.lineWidth = Math.max(0.8, H * 0.013)
+    for (const l of this.legs) {
+      if (l.lift > H * 0.01) continue
+      const w = (l.front ? H * 0.14 : H * 0.13) * 0.5
+      for (const t of [-0.4, 0.4]) {
+        ctx.beginPath()
+        ctx.moveTo(l.x + w * t, -H * 0.05)
+        ctx.lineTo(l.x + w * t, -H * 0.005)
+        ctx.stroke()
       }
     }
   }
@@ -390,7 +446,7 @@ export class CatRenderer {
   private drawZs(ctx: CanvasRenderingContext2D): void {
     if (this.anim !== 'sleep') return
     ctx.save()
-    ctx.translate(H * 0.36, -H * 1.2)
+    ctx.translate(H * 0.36, this.headCY - H * 0.28)
     ctx.strokeStyle = this.outline
     ctx.lineWidth = Math.max(1.5, H * 0.02)
     ctx.lineCap = 'round'
@@ -414,10 +470,6 @@ export class CatRenderer {
     ctx.restore()
   }
 
-  /**
-   * A generous, near-square box covering ears, whiskers, blush, tail sway and
-   * the floating sleep glyphs, so the stage clears every pixel the cat touches.
-   */
   boundsFor(scale: number): { left: number; top: number; width: number; height: number } {
     return {
       left: -1.2 * H * scale,
@@ -428,7 +480,7 @@ export class CatRenderer {
   }
 
   impact(force: number): void {
-    this.squashVelocity += Math.min(1, force / 600) * 8
+    this.squashVelocity += Math.min(1, force / 600) * 6
   }
 
   private updateSquash(dt: number): void {
