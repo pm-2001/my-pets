@@ -67,7 +67,7 @@ const POSES: Record<AnimState, Partial<Pose>> = {
   look: { earPerk: 0.35, tailWag: 0.16, tailRate: 2.2 },
   walk: { legSwing: 0.55, legRate: 9, tailBase: -0.75, tailWag: 0.18, tailRate: 5 },
   run: { legSwing: 0.9, legRate: 17, bodyRot: -0.1, tailBase: -1.15, tailWag: 0.22, tailRate: 9 },
-  sit: { bodyY: 11, bodyScaleY: 0.97, bodyScaleX: 1.02, legTuck: 0.55, tailBase: -0.15, tailWag: 0.1, tailRate: 1.1 },
+  sit: { bodyY: 11, headY: 11, bodyScaleY: 0.97, bodyScaleX: 1.02, legTuck: 0.55, tailBase: -0.15, tailWag: 0.1, tailRate: 1.1 },
   sleep: {
     bodyY: 14,
     bodyScaleY: 0.95,
@@ -139,6 +139,8 @@ export class CatRenderer {
   private belly: string
   private accent: string
   private shade: string
+  /** Darker coat tone for the tabby stripes (body, tail, legs, forehead). */
+  private stripe: string
 
   private pose: Pose = { ...REST }
   private legPhase = 0
@@ -160,6 +162,7 @@ export class CatRenderer {
     this.belly = css(palette.belly)
     this.accent = css(palette.accent)
     this.shade = css(darken(palette.coat, 0.16))
+    this.stripe = css(darken(palette.coat, 0.17))
   }
 
   /**
@@ -338,6 +341,12 @@ export class CatRenderer {
     ctx.save()
     ctx.clip()
     ellipse(ctx, H * 0.03, H * 0.14, H * 0.28, H * 0.14, this.belly)
+    // Tabby markings: triangular wedges dropping from the back toward the belly.
+    // Each is a downward triangle; the body clip trims it to the outline.
+    for (const sx of [0.17, 0.06, -0.05, -0.16, -0.27]) {
+      const hw = H * 0.042 // half-width of the wedge base along the back
+      poly(ctx, [sx * H - hw, -H * 0.26, sx * H + hw, -H * 0.26, (sx - 0.025) * H, H * 0.04], this.stripe)
+    }
     ctx.restore()
     ctx.restore()
   }
@@ -370,6 +379,18 @@ export class CatRenderer {
     }
 
     ellipse(ctx, 0, 0, H * 0.22, H * 0.22, this.coat)
+
+    // Forehead tabby markings: small triangular wedges between the ears, clipped
+    // to the head so their tops don't poke past it.
+    ctx.save()
+    ctx.beginPath()
+    ctx.ellipse(0, 0, H * 0.22, H * 0.22, 0, 0, Math.PI * 2)
+    ctx.clip()
+    for (const fx of [-0.06, 0.05, 0.16]) {
+      const hw = H * 0.022
+      poly(ctx, [fx * H - hw, -H * 0.24, fx * H + hw, -H * 0.24, (fx + 0.008) * H, -H * 0.09], this.stripe)
+    }
+    ctx.restore()
 
     for (const side of [-1, 1] as const) {
       ctx.save()
