@@ -156,6 +156,8 @@ export class CatRenderer {
   private facing: 1 | -1 = 1
   private scale = 1
   private speed = 0
+  /** Emoji to float in a thought bubble above the head, or null for none. */
+  private emote: string | null = null
 
   constructor(palette: { coat: number; belly: number; accent: number }) {
     this.coat = css(palette.coat)
@@ -163,6 +165,11 @@ export class CatRenderer {
     this.accent = css(palette.accent)
     this.shade = css(darken(palette.coat, 0.16))
     this.stripe = css(darken(palette.coat, 0.17))
+  }
+
+  /** Set (or clear) the emoji shown in the thought bubble above the head. */
+  setEmote(emote: string | null): void {
+    this.emote = emote
   }
 
   /**
@@ -211,15 +218,13 @@ export class CatRenderer {
     if (this.anim === 'climb') {
       // Cling to a vertical wall, head up, belly and paws toward the wall. `facing`
       // says which side the wall is on: +1 wall on the right, -1 wall on the left.
-      // Rotating the normally-horizontal sprite a quarter turn puts the head up and
-      // the leg/paw side against the wall; the left case adds a flip to keep it so.
+      // Rotate the horizontal sprite a quarter-turn so the head points up, then
+      // mirror by `facing` so the belly faces the wall on whichever side it is.
+      // Both cases share the same rotation — mirroring alone flips which side the
+      // wall is on, so neither ends up upside-down/backward.
       ctx.scale(this.scale, this.scale)
-      if (this.facing === 1) {
-        ctx.rotate(-Math.PI / 2)
-      } else {
-        ctx.rotate(Math.PI / 2)
-        ctx.scale(1, -1)
-      }
+      ctx.rotate(-Math.PI / 2)
+      ctx.scale(1, this.facing)
     } else {
       ctx.scale(this.facing * this.scale, this.scale)
     }
@@ -231,7 +236,26 @@ export class CatRenderer {
     this.drawFrontPaw(ctx)
     this.drawHead(ctx, breath, bob)
     this.drawZs(ctx)
+    this.drawEmote(ctx)
 
+    ctx.restore()
+  }
+
+  /** A thought bubble with an emoji above the head, for showing what the pet wants. */
+  private drawEmote(ctx: CanvasRenderingContext2D): void {
+    if (!this.emote || this.anim === 'climb') return
+    ctx.save()
+    // Cancel the horizontal facing flip so the bubble and emoji never mirror.
+    ctx.scale(this.facing, 1)
+    const bob = Math.sin(this.time * 2.4) * H * 0.02
+    const cx = H * 0.34
+    const cy = -H * 0.88 + bob
+    // Just the emoji floating above the head — no bubble behind it.
+    ctx.font = `${H * 0.18}px "Apple Color Emoji", system-ui, sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#333'
+    ctx.fillText(this.emote, cx, cy)
     ctx.restore()
   }
 
@@ -282,6 +306,9 @@ export class CatRenderer {
     const upperLen = len * 0.52
     const lowerLen = len * 0.48
     for (const [x, phase] of legs) {
+      // While a front paw is raised (scratching), skip the near front leg — the
+      // raised paw stands in for it, so it doesn't read as an extra fifth leg.
+      if (!isFar && x > 0 && p.frontPaw > 0.5) continue
       // Tuck bends the knee (all legs by the same amount, same direction) so the
       // shins fold back parallel under the body instead of the whole leg leaning as
       // a rigid stick; the lowering body then hides the folded shins.

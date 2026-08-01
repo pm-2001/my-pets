@@ -287,6 +287,7 @@ export class Stage {
       // and its rotated sprite smears.
       const anim = (window.pet.posePreview as AnimState) || entry.pet.anim
       entry.cat.update(dt, anim, entry.pet.facing, entry.pet.vx, scale)
+      entry.cat.setEmote(window.pet.emotePreview || entry.pet.emote)
 
       if (entry.pet.grounded && boundsReady) {
         const b = this.desktop.bounds

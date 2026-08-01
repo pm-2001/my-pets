@@ -155,6 +155,21 @@ export class Desktop {
   }
 
   /**
+   * True when column `x` is covered by some window (other than `exceptIndex`)
+   * whose top rises to about `top` or above and which extends below it — i.e. the
+   * spot is butted against a neighbouring/underlying window that stands just as
+   * tall, so a side edge there is an internal seam, not an exposed climbable wall.
+   */
+  private columnBlockedFrom(x: number, top: number, exceptIndex: number): boolean {
+    for (let i = 0; i < this.windows.length; i++) {
+      if (i === exceptIndex) continue
+      const w = this.windows[i]!
+      if (x >= w.x && x <= w.x + w.w && w.y <= top + 8 && w.y + w.h > top + 8) return true
+    }
+    return false
+  }
+
+  /**
    * The highest standable surface at column `x` that is at or below `fromY`.
    * Always returns something — the floor is the surface of last resort.
    */
@@ -222,19 +237,23 @@ export class Desktop {
       for (const side of [-1, 1] as const) {
         const edgeX = side < 0 ? w.x : w.x + w.w
         if (Math.abs(edgeX - x) > reach) continue
+        const approachX = side < 0 ? w.x - 6 : w.x + w.w + 6
+        // The face must be a genuinely exposed side wall. Two ways it can fail:
+        //  1. buried behind a window stacked in front (the pet would climb *through*
+        //     whatever is on top of it), so sample the inside edge for occlusion;
+        //  2. butted against a neighbouring or underlying window that rises just as
+        //     high, so the column just *outside* the edge is not open air — that
+        //     reads as the pet climbing up the middle of a window rather than a side.
         const mountProbe = side < 0 ? w.x + 12 : w.x + w.w - 12
-        // The edge must be exposed in front, not buried behind another window —
-        // otherwise the pet appears to climb *through* whatever is on top of it.
-        // Sample down the upper stretch of the edge and reject if any point is
-        // covered by a window stacked in front.
         const reachDown = Math.min(bottom, y) - top
         const probeYs = [top, top + reachDown * 0.2, top + reachDown * 0.45]
         if (probeYs.some((py) => this.occluded(i, mountProbe, py))) continue
+        if (this.columnBlockedFrom(approachX, top, i)) continue
         out.push({
           edgeX,
           topY: top,
           side,
-          approachX: side < 0 ? w.x - 6 : w.x + w.w + 6,
+          approachX,
           mountX: mountProbe,
           climbFacing: side < 0 ? 1 : -1,
           surface: { y: top, x1: w.x, x2: w.x + w.w, app: w.app },

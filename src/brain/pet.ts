@@ -1,6 +1,6 @@
 import type { PetLiveState } from '@shared/types'
 import type { Desktop, Surface, Wall } from '../world/desktop'
-import { ACTIONS, chooseAction, type ActionContext, type ActionId, type SelectionState } from './actions'
+import { ACTIONS, EMOTES, chooseAction, type ActionContext, type ActionId, type SelectionState } from './actions'
 import { freshNeeds, moodFrom, tickNeeds, type Mood, type Needs } from './needs'
 import { buildPalette, buildTraits, mulberry32, runSpeed, walkSpeed, type Traits } from './personality'
 
@@ -51,6 +51,12 @@ export class Pet {
 
   private rand: () => number
   private selection: SelectionState = { current: 'idle', elapsed: 0, duration: 2, since: {} }
+
+  /** The emoji to float above the head right now (what the pet wants/feels), or null. */
+  get emote(): string | null {
+    if (!this.grounded || this.asleep) return null
+    return EMOTES[this.selection.current] ?? null
+  }
   /** Where the pet is currently trying to walk to, in global x. */
   private targetX: number | null = null
   private jumpTarget: Surface | null = null
@@ -315,6 +321,20 @@ export class Pet {
       case 'scratch':
         this.vx = 0
         this.anim = 'scratch'
+        break
+
+      case 'drink':
+        // Settle in place and lap; the 💧 emote says what it's doing. Thirst
+        // drains over the short action, emptying by the time it moves on.
+        this.vx = 0
+        this.anim = 'sit'
+        this.needs.thirst = Math.max(0, this.needs.thirst - 42 * dt)
+        break
+
+      case 'eat':
+        this.vx = 0
+        this.anim = 'sit'
+        this.needs.hunger = Math.max(0, this.needs.hunger - 42 * dt)
         break
 
       case 'dance':

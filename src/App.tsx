@@ -34,6 +34,8 @@ const COMMANDS: [RegExp, string, string][] = [
   [/\b(stretch)\b/, 'stretch', '*big stretch*'],
   [/\b(play|celebrate|party|yay)\b/, 'celebrate', 'yay!'],
   [/\b(scratch)\b/, 'scratch', '*scratch scratch*'],
+  [/\b(drink|water|thirsty)\b/, 'drink', '*laps some water*'],
+  [/\b(eat|food|hungry|snack|treat|feed)\b/, 'eat', '*munches away*'],
   [/\b(look|watch|scan)\b/, 'lookAround', '*looks around*'],
   [/\b(walk|wander|stroll)\b/, 'walk', '*wanders off*'],
   [/\b(stop|stay|chill|relax|rest|calm)\b/, 'idle', '*settles down*'],

@@ -14,10 +14,9 @@ for itself what to do next.
 *Awake (tail up, blinking, whiskers) and asleep (flattened, eyes closed, floating Z). The
 pet is drawn procedurally in code — there are no image assets.*
 
-> **What's new in 0.2.0** — redrawn cat with a smoother body, a real four-beat walking
-> gait and knee-jointed legs that fold when it sits or sleeps; every cat in a litter now
-> gets a distinct coat colour; and larger size presets. Full list in
-> [CHANGELOG.md](CHANGELOG.md).
+> **What's new in 0.3.0** — cats now show **emoji emotions** (💧 thirsty, 🍗 hungry, ❤️
+> playful…) and act on them; a **tabby coat** with richer, more realistic colours; and a
+> soft lighting pass that gives them real depth. Full list in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 

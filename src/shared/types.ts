@@ -78,6 +78,8 @@ export interface NeedsSnapshot {
   curiosity: number
   loneliness: number
   excitement: number
+  thirst: number
+  hunger: number
 }
 
 /**
@@ -182,6 +184,8 @@ export interface PetBridge {
   debug: boolean
   /** PET_POSE=<anim> forces every pet to render that pose, for inspecting art. */
   posePreview: string | null
+  /** PET_EMOTE=<emoji> forces the thought-bubble emote, for inspecting art. */
+  emotePreview: string | null
   quit(): void
 }
 

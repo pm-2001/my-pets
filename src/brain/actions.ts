@@ -37,6 +37,8 @@ export type ActionId =
   | 'follow'
   | 'play'
   | 'climb'
+  | 'drink'
+  | 'eat'
 
 export interface ActionContext {
   needs: Needs
@@ -257,7 +259,40 @@ export const ACTIONS: ActionDef[] = [
     maxDuration: 14,
     cooldown: 16,
   },
+  {
+    id: 'drink',
+    // Wins once thirst is genuinely high; below that it stays out of the way.
+    score: (c) => n(c.needs.thirst - 45) * 1.5,
+    minDuration: 2.4,
+    maxDuration: 3.6,
+    cooldown: 20,
+  },
+  {
+    id: 'eat',
+    score: (c) => n(c.needs.hunger - 50) * 1.5,
+    minDuration: 2.6,
+    maxDuration: 3.8,
+    cooldown: 24,
+  },
 ]
+
+/**
+ * The emoji a pet floats above its head while an action is running, so you can
+ * read what it wants: a thought/emotion cue. Actions with no entry show nothing.
+ * Sleep is deliberately absent — the floating "Z"s already say it.
+ */
+export const EMOTES: Partial<Record<ActionId, string>> = {
+  drink: '💧',
+  eat: '🍗',
+  chase: '❤️',
+  follow: '❤️',
+  play: '🎉',
+  dance: '🎉',
+  celebrate: '🎉',
+  lookAround: '❓',
+  explore: '❓',
+  watch: '👀',
+}
 
 const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]))
 

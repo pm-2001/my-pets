@@ -73,6 +73,7 @@ const bridge: PetBridge = {
   quit: () => ipcRenderer.send('pet:quit'),
   debug: process.env.PET_DEBUG === '1',
   posePreview: process.env.PET_POSE ?? null,
+  emotePreview: process.env.PET_EMOTE ?? null,
 }
 
 contextBridge.exposeInMainWorld('pet', bridge)

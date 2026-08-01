@@ -14,12 +14,16 @@ export interface Needs {
   curiosity: number
   loneliness: number
   excitement: number
+  /** Rises slowly on its own; the `drink` action empties it. */
+  thirst: number
+  /** Rises slowly on its own; the `eat` action empties it. */
+  hunger: number
 }
 
 export type Mood = 'happy' | 'sleepy' | 'curious' | 'excited' | 'lonely' | 'relaxed' | 'bored'
 
 export function freshNeeds(): Needs {
-  return { sleepiness: 15, boredom: 20, curiosity: 30, loneliness: 10, excitement: 20 }
+  return { sleepiness: 15, boredom: 20, curiosity: 30, loneliness: 10, excitement: 20, thirst: 12, hunger: 18 }
 }
 
 const clamp = (n: number) => Math.max(0, Math.min(100, n))
@@ -59,12 +63,19 @@ export function tickNeeds(needs: Needs, traits: Traits, ctx: NeedContext, dt: nu
   // Excitement is spiky by nature: it is added to by events and always decays.
   const excitementRate = -1.4 + (ctx.idleSeconds < 2 ? 0.9 + traits.energy : 0)
 
+  // Thirst and hunger are simple clocks that creep up until the pet acts on
+  // them; drinking / eating drains them back down (handled in the pet). They
+  // pause while the pet sleeps, the way a real cat won't wake itself to eat.
+  const bodyRate = ctx.asleep ? 0 : 1
+
   return {
     sleepiness: clamp(needs.sleepiness + sleepRate * dt),
     boredom: clamp(needs.boredom + boredRate * dt),
     curiosity: clamp(needs.curiosity + curiosityRate * dt),
     loneliness: clamp(needs.loneliness + lonelyRate * dt),
     excitement: clamp(needs.excitement + excitementRate * dt),
+    thirst: clamp(needs.thirst + 0.16 * bodyRate * dt),
+    hunger: clamp(needs.hunger + 0.12 * bodyRate * dt),
   }
 }
 
