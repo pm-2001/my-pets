@@ -2,491 +2,378 @@ import type { AnimState } from '../brain/pet'
 import { PET_HEIGHT } from '../brain/pet'
 
 /**
- * The pet: a flat-vector side-profile cat, drawn procedurally on a small
- * skeleton so every movement is defined by joints rather than hand-drawn frames.
+ * The pet, drawn procedurally with Canvas2D.
  *
- * The rig, in body-local units (origin at the ground between the paws, +x is the
- * way the cat faces, -y is up):
- *   - a spine from hip -> shoulder, a neck/head off the shoulder, a 3-joint tail
- *     off the hip (all forward-kinematic);
- *   - four legs, each a thigh + shank solved by 2-bone IK to a *foot target* on
- *     (or above) the ground, so paws plant and the knees bend correctly.
+ * This is a direct port of what used to be a Pixi scene graph. A live WebGL
+ * context inside a transparent Electron window carries a large, frame-rate-
+ * independent compositing cost, and Canvas2D rasterises this little sprite
+ * several times more cheaply — so the whole render layer moved to immediate-mode
+ * drawing. The behaviour engine did not change at all; only the drawing did.
  *
- * `update()` lerps a small set of rig parameters towards a per-state target and
- * advances the walk cycle; `draw()` solves the skeleton and paints flat shapes on
- * it. No image assets, so each pet keeps its own seeded coat colour. Facing flips
- * the whole rig horizontally.
+ * Every animation is still expressed as a target `Pose`. The current pose is
+ * lerped towards the target each frame, which is what gives smooth transitions
+ * between states for free: there are no hand-authored blends between "walk" and
+ * "sit", the interpolation handles it. `update()` advances that simulation;
+ * `draw()` renders the current pose immediately — geometry is not retained
+ * between frames, which for a sprite this small is cheaper than it sounds and is
+ * exactly the trade the move off WebGL was making.
  */
 
-const H = PET_HEIGHT
+interface Pose {
+  /** Vertical offset of the whole body, in local units. Positive sinks down. */
+  bodyY: number
+  bodyRot: number
+  bodyScaleY: number
+  bodyScaleX: number
+  headRot: number
+  headY: number
+  /** Amplitude of the leg swing. Zero holds them still. */
+  legSwing: number
+  /** How fast the legs cycle, in radians per second. */
+  legRate: number
+  /** 0 closed, 1 wide open. */
+  eyeOpen: number
+  tailBase: number
+  tailWag: number
+  tailRate: number
+  /** Ears rotate outward as this rises. */
+  earPerk: number
+  /** Lifts the front paw, for scratching and waving. */
+  frontPaw: number
+}
 
+const REST: Pose = {
+  bodyY: 0,
+  bodyRot: 0,
+  bodyScaleY: 1,
+  bodyScaleX: 1,
+  headRot: 0,
+  headY: 0,
+  legSwing: 0,
+  legRate: 0,
+  eyeOpen: 1,
+  tailBase: -0.5,
+  tailWag: 0.08,
+  tailRate: 1.4,
+  earPerk: 0,
+  frontPaw: 0,
+}
+
+const POSES: Record<AnimState, Partial<Pose>> = {
+  idle: {},
+  look: { earPerk: 0.35, tailWag: 0.16, tailRate: 2.2 },
+  walk: { legSwing: 0.55, legRate: 9, tailBase: -0.75, tailWag: 0.18, tailRate: 5 },
+  run: { legSwing: 0.9, legRate: 17, bodyRot: -0.1, tailBase: -1.15, tailWag: 0.22, tailRate: 9 },
+  sit: { bodyY: 7, bodyScaleY: 0.9, bodyScaleX: 1.04, tailBase: -0.15, tailWag: 0.1, tailRate: 1.1 },
+  sleep: {
+    bodyY: 13,
+    bodyScaleY: 0.72,
+    bodyScaleX: 1.16,
+    headY: 6,
+    headRot: 0.22,
+    eyeOpen: 0,
+    // Laid down alongside the body rather than raised — a raised tail reads as
+    // an alert cat, which fights the rest of the pose.
+    tailBase: -1.45,
+    tailWag: 0.03,
+    tailRate: 0.5,
+    earPerk: -0.25,
+  },
+  jump: { bodyScaleY: 1.12, bodyScaleX: 0.92, legSwing: 0.4, bodyRot: -0.18, tailBase: -1.5, earPerk: 0.4 },
+  fall: { bodyScaleY: 1.06, bodyScaleX: 0.96, legSwing: 0.7, bodyRot: 0.14, tailBase: -1.9, earPerk: 0.5 },
+  stretch: { bodyY: 5, bodyScaleX: 1.28, bodyScaleY: 0.82, headY: 4, headRot: -0.2, tailBase: -1.7, eyeOpen: 0.25 },
+  dance: { bodyRot: 0.16, legSwing: 0.5, legRate: 12, tailWag: 0.5, tailRate: 12, earPerk: 0.5, headRot: -0.12 },
+  celebrate: { earPerk: 0.8, tailWag: 0.45, tailRate: 11, headRot: -0.22, frontPaw: 0.9, eyeOpen: 1 },
+  scratch: { bodyY: 4, frontPaw: 1, earPerk: 0.3, headRot: -0.1, tailWag: 0.2, tailRate: 4 },
+  // Body drawn as usual but reaching: the whole sprite is rotated upright against
+  // the wall in draw(). Legs cycle so the paws read as pulling it up hand-over-hand.
+  climb: { legSwing: 0.42, legRate: 7, tailBase: -0.35, tailWag: 0.06, tailRate: 1.4, earPerk: 0.28, eyeOpen: 1, bodyScaleX: 1.04 },
+}
+
+const TAIL_SEGMENTS = 5
+const H = PET_HEIGHT
+/** Length of every tail joint; only the widths taper down the chain. */
+const TAIL_LEN = H * 0.145
+
+/** 0xRRGGBB (how palettes are stored) to a Canvas2D fill string. */
 function css(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`
 }
-function lighten(color: number, a: number): number {
-  const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
-  const m = (c: number) => Math.round(c + (255 - c) * a)
-  return (m(r) << 16) | (m(g) << 8) | m(b)
-}
-function darken(color: number, a: number): number {
-  const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
-  const m = (c: number) => Math.round(c * (1 - a))
-  return (m(r) << 16) | (m(g) << 8) | m(b)
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number, fill: string): void {
+  ctx.beginPath()
+  ctx.roundRect(x, y, w, h, r)
+  ctx.fillStyle = fill
+  ctx.fill()
 }
 
-interface Vec { x: number; y: number }
-
-/** The tunable state of the skeleton — what a pose sets and update() lerps. */
-interface Rig {
-  hipY: number      // hip height above ground (up = larger)
-  shoulderY: number // shoulder height above ground
-  bodyLen: number   // hip -> shoulder distance
-  headAngle: number // neck angle: 0 level, + lowers the muzzle
-  headOut: number   // how far the head reaches forward from the shoulder
-  earPerk: number
-  eyeOpen: number
-  tail: [number, number, number] // three tail joint angles (rad)
-  /** Foot targets, in ground-local x offset from their rest column; y is lift. */
-  gait: number      // 0 planted, 1 full walk cycle
-  stride: number    // stride length in units of H
-  crouch: number    // lowers everything (sleep)
+function ellipse(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number, fill: string): void {
+  ctx.beginPath()
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2)
+  ctx.fillStyle = fill
+  ctx.fill()
 }
 
-const STAND: Rig = {
-  hipY: 0.58,
-  shoulderY: 0.58,
-  bodyLen: 0.92,
-  headAngle: 0,
-  headOut: 1,
-  earPerk: 0,
-  eyeOpen: 1,
-  // Up and back off the rump, tip curling forward — a proud upright tail.
-  tail: [-2.05, 0.5, 0.55],
-  gait: 0,
-  stride: 0.12,
-  crouch: 0,
-}
-
-function poseFor(anim: AnimState): Partial<Rig> {
-  switch (anim) {
-    case 'walk':
-      return { gait: 1, stride: 0.12, tail: [-2.0, 0.45, 0.5], earPerk: 0.1 }
-    case 'run':
-      return { gait: 1, stride: 0.2, hipY: 0.56, shoulderY: 0.58, tail: [-1.85, 0.35, 0.4], earPerk: 0.2, headAngle: 0.1 }
-    case 'look':
-      return { earPerk: 0.5, headAngle: -0.15, tail: [-2.0, 0.4, 0.4] }
-    case 'sit':
-      // Haunches down at the back, forelegs straight, chest up.
-      return { hipY: 0.26, shoulderY: 0.64, bodyLen: 0.5, tail: [-1.7, -0.2, -0.2], headAngle: -0.05 }
-    case 'sleep':
-      // A low loaf with the head tucked down.
-      return { hipY: 0.2, shoulderY: 0.24, bodyLen: 0.66, crouch: 0.12, headAngle: 0.5, headOut: 0.7, eyeOpen: 0, earPerk: -0.3, tail: [-1.2, 0.3, 0.5] }
-    case 'stretch':
-      return { hipY: 0.7, shoulderY: 0.42, bodyLen: 0.72, headAngle: -0.2, tail: [-2.7, -0.6, -0.5], eyeOpen: 0.4 }
-    case 'jump':
-      return { hipY: 0.74, shoulderY: 0.78, bodyLen: 0.58, headAngle: -0.2, earPerk: 0.4, tail: [-2.9, -0.7, -0.6] }
-    case 'fall':
-      return { hipY: 0.5, shoulderY: 0.52, headAngle: 0.1, earPerk: 0.5, tail: [-1.8, 0.2, 0.3] }
-    case 'dance':
-      return { earPerk: 0.5, tail: [-2.2, -0.6, -0.6], headAngle: -0.1 }
-    case 'celebrate':
-      return { earPerk: 0.8, hipY: 0.62, tail: [-2.7, -0.7, -0.6], headAngle: -0.2 }
-    case 'scratch':
-      return { earPerk: 0.3, tail: [-2.3, -0.3, -0.3] }
-    case 'climb':
-      return { headAngle: -0.3, earPerk: 0.3, tail: [-1.6, -0.2, -0.2] }
-    default:
-      return {}
-  }
-}
-
-/** Solve a 2-bone chain from joint J so the paw reaches target F; return the knee. */
-function ik(J: Vec, F: Vec, l1: number, l2: number, bend: number): Vec {
-  let dx = F.x - J.x, dy = F.y - J.y
-  let d = Math.hypot(dx, dy)
-  const min = Math.abs(l1 - l2) + 1e-3
-  const max = l1 + l2 - 1e-3
-  if (d < min) d = min
-  if (d > max) d = max
-  const base = Math.atan2(dy, dx)
-  const cosA = (d * d + l1 * l1 - l2 * l2) / (2 * d * l1)
-  const a = Math.acos(Math.max(-1, Math.min(1, cosA)))
-  const ka = base + bend * a
-  return { x: J.x + l1 * Math.cos(ka), y: J.y + l1 * Math.sin(ka) }
+function poly(ctx: CanvasRenderingContext2D, pts: number[], fill: string): void {
+  ctx.beginPath()
+  ctx.moveTo(pts[0]!, pts[1]!)
+  for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i]!, pts[i + 1]!)
+  ctx.closePath()
+  ctx.fillStyle = fill
+  ctx.fill()
 }
 
 export class CatRenderer {
   private coat: string
-  private stripe: string
-  private shade: string
   private belly: string
-  private ear: string
-  private dark: string
+  private accent: string
 
-  private rig: Rig = { ...STAND, tail: [...STAND.tail] as [number, number, number] }
+  private pose: Pose = { ...REST }
   private legPhase = 0
   private blinkTimer = 2
   private blinkAmount = 1
+  /** Squash-and-stretch spring, kicked on landing. */
   private squash = 0
   private squashVelocity = 0
   private time = 0
 
+  // Snapshot of the last update(), so draw() is a pure function of stored state.
   private anim: AnimState = 'idle'
   private facing: 1 | -1 = 1
   private scale = 1
+  private speed = 0
 
   constructor(palette: { coat: number; belly: number; accent: number }) {
     this.coat = css(palette.coat)
-    this.stripe = css(darken(palette.coat, 0.17))
-    this.shade = css(darken(palette.coat, 0.1))
-    this.belly = css(lighten(palette.coat, 0.55))
-    this.ear = css(lighten(palette.coat, 0.28))
-    this.dark = css(darken(palette.coat, 0.62))
+    this.belly = css(palette.belly)
+    this.accent = css(palette.accent)
   }
 
+  /**
+   * Advance the animation simulation. Cheap and allocation-light so it can run
+   * every frame for every pet even when the frame is not ultimately drawn.
+   *
+   * @param facing  1 faces right, -1 faces left
+   * @param speed   horizontal speed in points/sec, used to drive gait timing
+   */
   update(dt: number, anim: AnimState, facing: 1 | -1, speed: number, scale: number): void {
     this.time += dt
     this.anim = anim
     this.facing = facing
+    this.speed = speed
     this.scale = scale
 
-    const target: Rig = { ...STAND, ...poseFor(anim) }
-    const k = 1 - Math.exp(-11 * dt)
-    this.rig.hipY += (target.hipY - this.rig.hipY) * k
-    this.rig.shoulderY += (target.shoulderY - this.rig.shoulderY) * k
-    this.rig.bodyLen += (target.bodyLen - this.rig.bodyLen) * k
-    this.rig.headAngle += (target.headAngle - this.rig.headAngle) * k
-    this.rig.headOut += (target.headOut - this.rig.headOut) * k
-    this.rig.earPerk += (target.earPerk - this.rig.earPerk) * k
-    this.rig.gait += (target.gait - this.rig.gait) * k
-    this.rig.stride += (target.stride - this.rig.stride) * k
-    this.rig.crouch += (target.crouch - this.rig.crouch) * k
-    this.rig.tail[0] += (target.tail[0] - this.rig.tail[0]) * k
-    this.rig.tail[1] += (target.tail[1] - this.rig.tail[1]) * k
-    this.rig.tail[2] += (target.tail[2] - this.rig.tail[2]) * k
+    const target = { ...REST, ...POSES[anim] }
+    // Lerp rate tuned so transitions land in roughly a fifth of a second — fast
+    // enough to feel responsive, slow enough to read as a movement.
+    const k = 1 - Math.exp(-12 * dt)
+    for (const key of Object.keys(this.pose) as (keyof Pose)[]) {
+      this.pose[key] += (target[key] - this.pose[key]) * k
+    }
 
     this.updateBlink(dt, target.eyeOpen)
     this.updateSquash(dt)
-    // Advance the walk cycle only while there is gait; faster when running.
-    if (this.rig.gait > 0.03) {
-      const rate = 5 + Math.abs(speed) * 0.06 + (anim === 'run' ? 5 : 0)
-      this.legPhase += rate * dt
-    }
+
+    // Gait phase advances with actual speed so walking and running share one
+    // cycle and never look like they are sliding.
+    const rate = this.pose.legRate > 0 ? this.pose.legRate : 0
+    this.legPhase += (rate + Math.abs(speed) * 0.04) * dt
   }
 
+  /**
+   * Draw the pet at the current context origin, which the caller has already
+   * translated to the pet's feet. Mirrors the old scene-graph hierarchy exactly:
+   * tail, back legs, body, front legs, front paw, head, then sleep glyphs.
+   */
   draw(ctx: CanvasRenderingContext2D): void {
-    const r = this.rig
-    const breath = Math.sin(this.time * (this.anim === 'sleep' ? 1.1 : 2.4)) * (this.anim === 'sleep' ? 0.02 : 0.01)
-    const crouch = r.crouch * H
+    const p = this.pose
+    const breathRate = this.anim === 'sleep' ? 1.1 : 2.4
+    const breath = Math.sin(this.time * breathRate) * (this.anim === 'sleep' ? 0.05 : 0.022)
+    const bob = p.legSwing > 0.05 ? Math.abs(Math.sin(this.legPhase)) * H * 0.02 : 0
 
-    // --- key joints (canonical: facing +x, ground at y=0) ---
-    const halfLen = r.bodyLen * 0.5 * H
-    const hip: Vec = { x: -halfLen, y: -r.hipY * H + crouch }
-    const shoulder: Vec = { x: halfLen, y: -r.shoulderY * H + crouch }
-    // Neck/head off the shoulder.
-    const spineA = Math.atan2(shoulder.y - hip.y, shoulder.x - hip.x)
-    // Neck rises from the front of the chest; the head sits close above it.
-    const neck: Vec = { x: shoulder.x + H * 0.1, y: shoulder.y - H * 0.08 }
-    const headBob = Math.abs(Math.sin(this.legPhase)) * H * 0.015 * r.gait
-    const head: Vec = {
-      x: neck.x + Math.cos(-0.4 + r.headAngle) * H * 0.19 * r.headOut,
-      y: neck.y + Math.sin(-0.4 + r.headAngle) * H * 0.19 * r.headOut + headBob,
-    }
-
-    // --- feet (IK targets) ---
-    const walk = r.gait
-    const foot = (restX: number, phaseOff: number): Vec => {
-      const t = ((this.legPhase / (Math.PI * 2) + phaseOff) % 1 + 1) % 1
-      let fx = restX
-      let fy = 0
-      if (walk > 0.02) {
-        if (t < 0.5) {
-          // Stance: paw planted, sliding backward from +stride to -stride.
-          fx = restX + r.stride * H * (1 - 4 * t)
-        } else {
-          // Swing: lift and swing forward from -stride back to +stride.
-          const u = (t - 0.5) / 0.5
-          fx = restX + r.stride * H * (2 * u - 1)
-          fy = -Math.sin(u * Math.PI) * H * 0.16
-        }
-        fx = restX + (fx - restX) * walk
-        fy *= walk
+    ctx.save()
+    if (this.anim === 'climb') {
+      // Cling to a vertical wall, head up, belly and paws toward the wall. `facing`
+      // says which side the wall is on: +1 wall on the right, -1 wall on the left.
+      // Rotating the normally-horizontal sprite a quarter turn puts the head up and
+      // the leg/paw side against the wall; the left case adds a flip to keep it so.
+      ctx.scale(this.scale, this.scale)
+      if (this.facing === 1) {
+        ctx.rotate(-Math.PI / 2)
+      } else {
+        ctx.rotate(Math.PI / 2)
+        ctx.scale(1, -1)
       }
-      return { x: fx, y: fy }
+    } else {
+      ctx.scale(this.facing * this.scale, this.scale)
     }
-    // Front legs hang from the shoulder, back legs from the hip; near/far offset.
-    // Legs hang from the belly straight down (feet under their joints).
-    const belly = H * 0.19
-    const jFrontNear: Vec = { x: shoulder.x - H * 0.08, y: shoulder.y + belly }
-    const jFrontFar: Vec = { x: shoulder.x - H * 0.02, y: shoulder.y + belly }
-    const jBackNear: Vec = { x: hip.x + H * 0.08, y: hip.y + belly }
-    const jBackFar: Vec = { x: hip.x + H * 0.02, y: hip.y + belly }
-    const fFrontNear = foot(shoulder.x - H * 0.08, 0)
-    const fFrontFar = foot(shoulder.x - H * 0.02, 0.5)
-    const fBackNear = foot(hip.x + H * 0.08, 0.5)
-    const fBackFar = foot(hip.x + H * 0.02, 0)
 
-    // --- paint ---
-    ctx.save()
-    ctx.scale(this.facing * this.scale, this.scale)
-
-    // Far legs (behind the body), darker.
-    this.drawLeg(ctx, jFrontFar, fFrontFar, this.shade)
-    this.drawLeg(ctx, jBackFar, fBackFar, this.shade)
-
-    this.drawTail(ctx, hip)
-    this.drawBody(ctx, hip, shoulder, spineA, breath)
-    this.drawHead(ctx, neck, head)
-
-    // Near legs (in front), full colour.
-    this.drawLeg(ctx, jBackNear, fBackNear, this.coat)
-    this.drawLeg(ctx, jFrontNear, fFrontNear, this.coat)
-
-    ctx.restore()
-
-    this.drawZs(ctx, head)
-  }
-
-  private drawLeg(ctx: CanvasRenderingContext2D, J: Vec, F: Vec, color: string): void {
-    const l1 = H * 0.24, l2 = H * 0.26
-    // Front legs (positive x joints) bend their elbow back; hind legs bend forward.
-    const bend = J.x > 0 ? 1 : -1
-    const K = ik(J, F, l1, l2, bend)
-    ctx.strokeStyle = color
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-    // Slim legs: a slightly fuller upper leg tapering to a thin shank.
-    ctx.lineWidth = H * 0.09
-    ctx.beginPath()
-    ctx.moveTo(J.x, J.y)
-    ctx.lineTo(K.x, K.y)
-    ctx.stroke()
-    ctx.lineWidth = H * 0.07
-    ctx.beginPath()
-    ctx.moveTo(K.x, K.y)
-    ctx.lineTo(F.x, F.y)
-    ctx.stroke()
-    // A small paw.
-    ctx.beginPath()
-    ctx.ellipse(F.x + H * 0.02, F.y - H * 0.01, H * 0.05, H * 0.038, 0, 0, Math.PI * 2)
-    ctx.fillStyle = color
-    ctx.fill()
-  }
-
-  private drawTail(ctx: CanvasRenderingContext2D, hip: Vec): void {
-    const r = this.rig
-    const wag = Math.sin(this.time * 2.4) * 0.12 * (this.anim === 'walk' || this.anim === 'run' ? 1.6 : 1)
-    let x = hip.x - H * 0.08
-    let y = hip.y + H * 0.02
-    let ang = r.tail[0]!
-    const pts: Vec[] = [{ x, y }]
-    const segs = [H * 0.24, H * 0.22, H * 0.2]
-    for (let i = 0; i < 3; i++) {
-      ang += (i === 0 ? 0 : r.tail[i]!) + wag * (i + 1) * 0.5
-      x += Math.cos(ang) * segs[i]!
-      y += Math.sin(ang) * segs[i]!
-      pts.push({ x, y })
-    }
-    ctx.strokeStyle = this.coat
-    ctx.lineCap = 'round'
-    ctx.lineWidth = H * 0.13
-    ctx.beginPath()
-    ctx.moveTo(pts[0]!.x, pts[0]!.y)
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i]!.x, pts[i]!.y)
-    ctx.stroke()
-    // Tail stripes.
-    ctx.strokeStyle = this.stripe
-    ctx.lineWidth = H * 0.13
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1]!, b = pts[i]!
-      const mx = a.x + (b.x - a.x) * 0.55, my = a.y + (b.y - a.y) * 0.55
-      ctx.beginPath()
-      ctx.moveTo(a.x + (b.x - a.x) * 0.35, a.y + (b.y - a.y) * 0.35)
-      ctx.lineTo(mx, my)
-      ctx.stroke()
-    }
-  }
-
-  private drawBody(ctx: CanvasRenderingContext2D, hip: Vec, shoulder: Vec, spineA: number, breath: number): void {
-    const mx = (hip.x + shoulder.x) / 2
-    const my = (hip.y + shoulder.y) / 2
-    const len = Math.hypot(shoulder.x - hip.x, shoulder.y - hip.y)
-    const half = len / 2 + H * 0.16
-    const th = H * (0.22 + breath) // half body thickness
-
-    // Work in the body's own frame: +x toward the front (shoulder), y down.
-    ctx.save()
-    ctx.translate(mx, my)
-    ctx.rotate(spineA)
-
-    // Torso: a long rounded rectangle — flat back, rounded rump and chest.
-    ctx.fillStyle = this.coat
-    ctx.beginPath()
-    ctx.roundRect(-half, -th, half * 2, th * 2, [th * 0.95, th * 0.7, th * 0.7, th])
-    ctx.fill()
-    // A little extra chest fullness at the front-lower.
-    ctx.beginPath()
-    ctx.ellipse(half - th * 0.35, th * 0.35, th * 0.75, th * 0.95, 0, 0, Math.PI * 2)
-    ctx.fill()
-
-    // Cream belly + chest patch along the underside/front.
-    ctx.fillStyle = this.belly
-    ctx.beginPath()
-    ctx.ellipse(half * 0.32, th * 0.55, half * 0.52, th * 0.55, 0, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.beginPath()
-    ctx.ellipse(half - th * 0.4, th * 0.35, th * 0.42, th * 0.62, 0, 0, Math.PI * 2)
-    ctx.fill()
-
-    // Tabby stripes over the mid-back.
-    ctx.strokeStyle = this.stripe
-    ctx.lineCap = 'round'
-    ctx.lineWidth = H * 0.05
-    for (const fx of [-0.12, 0.02, 0.16, 0.3]) {
-      const bx = half * fx
-      ctx.beginPath()
-      ctx.moveTo(bx, -th * 0.9)
-      ctx.lineTo(bx, -th * 0.25)
-      ctx.stroke()
-    }
+    this.drawTail(ctx)
+    this.drawLegs(ctx, /* front */ false)
+    this.drawBody(ctx, breath, bob)
+    this.drawLegs(ctx, /* front */ true)
+    this.drawFrontPaw(ctx)
+    this.drawHead(ctx, breath, bob)
+    this.drawZs(ctx)
 
     ctx.restore()
   }
 
-  private drawHead(ctx: CanvasRenderingContext2D, neck: Vec, head: Vec): void {
-    const r = this.rig
-    const perk = r.earPerk * 0.06
-
-    // Neck: a rounded coat bridge from the chest to the head.
-    ctx.strokeStyle = this.coat
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-    ctx.lineWidth = H * 0.24
-    ctx.beginPath()
-    ctx.moveTo(neck.x - H * 0.02, neck.y + H * 0.12)
-    ctx.lineTo(head.x - H * 0.09, head.y + H * 0.08)
-    ctx.stroke()
-
-    // Far ear (behind the head), a shade darker.
-    ctx.fillStyle = this.shade
-    ctx.beginPath()
-    ctx.moveTo(head.x - H * 0.17, head.y - H * 0.11)
-    ctx.lineTo(head.x - H * 0.11, head.y - H * (0.35 + perk))
-    ctx.lineTo(head.x - H * 0.0, head.y - H * 0.15)
-    ctx.closePath()
-    ctx.fill()
-
-    // Head (large, rounded) + a soft muzzle at the front.
-    ctx.fillStyle = this.coat
-    ctx.beginPath()
-    ctx.ellipse(head.x, head.y, H * 0.215, H * 0.2, 0, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.beginPath()
-    ctx.ellipse(head.x + H * 0.17, head.y + H * 0.07, H * 0.12, H * 0.095, 0, 0, Math.PI * 2)
-    ctx.fill()
-
-    // Near ear (front) with a pink inner.
-    ctx.fillStyle = this.coat
-    ctx.beginPath()
-    ctx.moveTo(head.x - H * 0.05, head.y - H * 0.15)
-    ctx.lineTo(head.x + H * 0.02, head.y - H * (0.37 + perk))
-    ctx.lineTo(head.x + H * 0.15, head.y - H * 0.15)
-    ctx.closePath()
-    ctx.fill()
-    ctx.fillStyle = this.ear
-    ctx.beginPath()
-    ctx.moveTo(head.x + H * 0.0, head.y - H * 0.16)
-    ctx.lineTo(head.x + H * 0.04, head.y - H * (0.3 + perk))
-    ctx.lineTo(head.x + H * 0.1, head.y - H * 0.16)
-    ctx.closePath()
-    ctx.fill()
-
-    // Nose + a short mouth line.
-    ctx.fillStyle = this.dark
-    ctx.beginPath()
-    ctx.moveTo(head.x + H * 0.25, head.y + H * 0.01)
-    ctx.lineTo(head.x + H * 0.3, head.y + H * 0.01)
-    ctx.lineTo(head.x + H * 0.275, head.y + H * 0.05)
-    ctx.closePath()
-    ctx.fill()
-    ctx.strokeStyle = this.dark
-    ctx.lineWidth = Math.max(0.8, H * 0.01)
-    ctx.beginPath()
-    ctx.moveTo(head.x + H * 0.275, head.y + H * 0.05)
-    ctx.lineTo(head.x + H * 0.275, head.y + H * 0.095)
-    ctx.stroke()
-
-    // Eye.
-    const open = Math.max(0.06, this.blinkAmount)
+  private drawTail(ctx: CanvasRenderingContext2D): void {
+    const p = this.pose
     ctx.save()
-    ctx.translate(head.x + H * 0.09, head.y - H * 0.04)
-    ctx.scale(1, open)
-    ctx.beginPath()
-    ctx.ellipse(0, 0, H * 0.035, H * 0.048, 0, 0, Math.PI * 2)
-    ctx.fillStyle = this.dark
-    ctx.fill()
-    if (open > 0.4) {
-      ctx.beginPath()
-      ctx.ellipse(H * 0.012, -H * 0.016, H * 0.012, H * 0.014, 0, 0, Math.PI * 2)
-      ctx.fillStyle = '#ffffff'
-      ctx.fill()
+    ctx.translate(-H * 0.31, -H * 0.4)
+    for (let i = 0; i < TAIL_SEGMENTS; i++) {
+      // Each joint lives in its parent's rotated frame, so transforms accumulate
+      // down the chain without a save/restore per joint — that is what makes the
+      // wag travel outward as a wave instead of swinging rigidly from the base.
+      if (i > 0) ctx.translate(0, -TAIL_LEN)
+      const wag = Math.sin(this.time * p.tailRate + i * 0.5) * p.tailWag
+      const curl = i === 0 ? p.tailBase - this.speed * 0.0012 : 0.17
+      ctx.rotate(curl + wag)
+      const width = H * 0.095 * (1 - i * 0.11)
+      roundRect(ctx, -width / 2, -TAIL_LEN, width, TAIL_LEN + width / 2, width / 2, i === TAIL_SEGMENTS - 1 ? this.belly : this.coat)
     }
     ctx.restore()
+  }
 
-    // Whiskers (short).
-    ctx.strokeStyle = this.dark
-    ctx.globalAlpha = 0.5
-    ctx.lineWidth = Math.max(0.8, H * 0.008)
-    for (const dy of [-0.01, 0.02, 0.05]) {
-      ctx.beginPath()
-      ctx.moveTo(head.x + H * 0.24, head.y + H * (0.04 + dy))
-      ctx.lineTo(head.x + H * 0.46, head.y + H * (0.01 + dy * 1.8))
-      ctx.stroke()
+  private drawLegs(ctx: CanvasRenderingContext2D, front: boolean): void {
+    const p = this.pose
+    const xs = front ? [H * 0.1, H * 0.21] : [-H * 0.17, -H * 0.05]
+    for (let i = 0; i < xs.length; i++) {
+      // Global leg index across the four legs, so diagonal pairs stay in phase.
+      const index = front ? i + 2 : i
+      const offset = index === 0 || index === 3 ? 0 : Math.PI
+      ctx.save()
+      ctx.translate(xs[i]!, -H * 0.19 + p.bodyY * 0.35)
+      ctx.rotate(Math.sin(this.legPhase + offset) * p.legSwing)
+      roundRect(ctx, -H * 0.045, 0, H * 0.09, H * 0.19, H * 0.045, this.coat)
+      ctx.restore()
     }
+  }
+
+  private drawBody(ctx: CanvasRenderingContext2D, breath: number, bob: number): void {
+    const p = this.pose
+    ctx.save()
+    ctx.translate(0, -H * 0.38 + p.bodyY - bob)
+    ctx.rotate(p.bodyRot + (this.anim === 'dance' ? Math.sin(this.time * 6) * 0.12 : 0))
+    ctx.scale(p.bodyScaleX * (1 - this.squash * 0.35), (p.bodyScaleY + breath) * (1 + this.squash * 0.45))
+    ellipse(ctx, 0, 0, H * 0.36, H * 0.23, this.coat)
+    ellipse(ctx, H * 0.04, H * 0.09, H * 0.26, H * 0.12, this.belly)
+    ctx.restore()
+  }
+
+  private drawFrontPaw(ctx: CanvasRenderingContext2D): void {
+    const pawUp = this.pose.frontPaw
+    if (pawUp <= 0.02) return
+    const wave = this.anim === 'scratch' ? Math.sin(this.time * 14) * 0.5 : Math.sin(this.time * 7) * 0.3
+    ctx.save()
+    ctx.translate(H * 0.21, -H * 0.34 - pawUp * H * 0.08)
+    ctx.rotate(-pawUp * 1.1 + wave * pawUp)
+    roundRect(ctx, -H * 0.045, 0, H * 0.09, H * 0.2, H * 0.045, this.coat)
+    ctx.restore()
+  }
+
+  private drawHead(ctx: CanvasRenderingContext2D, breath: number, bob: number): void {
+    const p = this.pose
+    ctx.save()
+    ctx.translate(H * 0.22, -H * 0.62 + p.headY - bob * 1.4)
+    ctx.rotate(p.headRot + (this.anim === 'look' ? Math.sin(this.time * 1.6) * 0.18 : 0) + breath * 0.6)
+
+    // Ears, drawn behind the head so their bases tuck under it.
+    for (const side of [-1, 1] as const) {
+      ctx.save()
+      ctx.translate(side * H * 0.11, -H * 0.13)
+      ctx.rotate(side * p.earPerk * 0.5)
+      poly(ctx, [0, 0, side * H * 0.13, -H * 0.15, side * H * 0.17, H * 0.03], this.coat)
+      poly(ctx, [side * 0.02 * H, -H * 0.01, side * H * 0.11, -H * 0.11, side * H * 0.13, 0], this.accent)
+      ctx.restore()
+    }
+
+    ellipse(ctx, 0, 0, H * 0.22, H * 0.22, this.coat)
+
+    for (const side of [-1, 1] as const) {
+      ctx.save()
+      ctx.translate(H * 0.055 + side * H * 0.075, -H * 0.02)
+      ctx.scale(1, Math.max(0.08, this.blinkAmount))
+      ellipse(ctx, 0, 0, H * 0.035, H * 0.05, this.accent)
+      // Catchlight — tiny, but it is most of what makes a face feel alive.
+      ellipse(ctx, H * 0.014, -H * 0.018, H * 0.014, H * 0.014, '#ffffff')
+      ctx.restore()
+    }
+
+    poly(ctx, [H * 0.17, H * 0.05, H * 0.23, H * 0.05, H * 0.2, H * 0.09], this.accent)
+
+    ctx.beginPath()
+    for (const dy of [-0.02, 0.01, 0.04]) {
+      ctx.moveTo(H * 0.19, H * (0.05 + dy))
+      ctx.lineTo(H * 0.42, H * (0.03 + dy * 2.2))
+    }
+    ctx.lineWidth = Math.max(1, H * 0.012)
+    ctx.strokeStyle = this.accent
+    ctx.globalAlpha = 0.55
+    ctx.stroke()
     ctx.globalAlpha = 1
+
+    ctx.restore()
   }
 
-  private drawZs(ctx: CanvasRenderingContext2D, head: Vec): void {
+  private drawZs(ctx: CanvasRenderingContext2D): void {
     if (this.anim !== 'sleep') return
     ctx.save()
-    ctx.scale(this.scale, this.scale)
-    ctx.translate(this.facing * (head.x + H * 0.2), head.y - H * 0.25)
-    ctx.strokeStyle = this.dark
+    ctx.translate(H * 0.34, -H * 0.85)
+    ctx.strokeStyle = '#ffffff'
     ctx.lineWidth = Math.max(1.5, H * 0.02)
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
     for (let i = 0; i < 3; i++) {
       const phase = (this.time * 0.42 + i / 3) % 1
-      const s = 0.55 + phase * 0.7
-      ctx.globalAlpha = Math.sin(phase * Math.PI) * 0.8
+      const s = 0.6 + phase * 0.7
+      // Fade in then out so glyphs do not pop at the start or end of the loop.
+      ctx.globalAlpha = Math.sin(phase * Math.PI) * 0.75
       ctx.save()
-      ctx.translate(phase * H * 0.16, -phase * H * 0.45)
+      ctx.translate(phase * H * 0.18, -phase * H * 0.5)
       ctx.scale(s, s)
       ctx.beginPath()
       ctx.moveTo(0, 0)
-      ctx.lineTo(H * 0.07, 0)
-      ctx.lineTo(0, H * 0.07)
-      ctx.lineTo(H * 0.07, H * 0.07)
+      ctx.lineTo(H * 0.08, 0)
+      ctx.lineTo(0, H * 0.08)
+      ctx.lineTo(H * 0.08, H * 0.08)
       ctx.stroke()
       ctx.restore()
     }
+    ctx.globalAlpha = 1
     ctx.restore()
   }
 
+  /**
+   * The pet's bounding box in local (unscaled-by-position) points, used by the
+   * stage to clear only the pixels a pet touches. It must cover the fully
+   * extended tail (which can swing more than a body-length from its root) and the
+   * floating sleep glyphs, and it must be symmetric because `facing` mirrors the
+   * whole sprite — an under-sized box leaves tail-tip ghosts as the pet walks.
+   */
   boundsFor(scale: number): { left: number; top: number; width: number; height: number } {
+    // Climbing rotates the whole sprite a quarter turn, swinging the tail down
+    // below the feet and the head out to the side. The upright box does not cover
+    // that, so a climbing pet needs a larger, near-square box or its tail smears a
+    // trail up the wall as it ascends.
+    if (this.anim === 'climb') {
+      return { left: -1.55 * H * scale, top: -1.55 * H * scale, width: 3.1 * H * scale, height: 2.9 * H * scale }
+    }
     return {
-      left: -1.1 * H * scale,
-      top: -1.35 * H * scale,
-      width: 2.2 * H * scale,
-      height: 1.55 * H * scale,
+      left: -1.2 * H * scale,
+      top: -1.45 * H * scale,
+      width: 2.4 * H * scale,
+      height: 1.65 * H * scale,
     }
   }
 
+  /** Called by the stage when the pet lands, to kick the squash spring. */
   impact(force: number): void {
-    this.squashVelocity += Math.min(1, force / 600) * 5
+    this.squashVelocity += Math.min(1, force / 600) * 9
   }
 
   private updateSquash(dt: number): void {
+    // Critically-ish damped spring back to zero.
     this.squashVelocity += -this.squash * 220 * dt
     this.squashVelocity *= Math.exp(-11 * dt)
     this.squash += this.squashVelocity * dt
@@ -494,11 +381,14 @@ export class CatRenderer {
 
   private updateBlink(dt: number, targetOpen: number): void {
     if (targetOpen < 0.3) {
+      // Asleep or squinting — hold the lids where the pose wants them.
       this.blinkAmount += (targetOpen - this.blinkAmount) * (1 - Math.exp(-10 * dt))
       return
     }
+
     this.blinkTimer -= dt
     if (this.blinkTimer <= 0) {
+      // Irregular intervals; a metronomic blink looks robotic.
       this.blinkTimer = 1.8 + Math.random() * 4.5
       this.blinkAmount = 0
     }
