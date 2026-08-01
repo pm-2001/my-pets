@@ -40,6 +40,8 @@ interface Pose {
   earPerk: number
   /** Lifts the front paw, for scratching and waving. */
   frontPaw: number
+  /** 0 legs fully extended, 1 legs retracted/folded under the body (sit/sleep). */
+  legTuck: number
 }
 
 const REST: Pose = {
@@ -57,6 +59,7 @@ const REST: Pose = {
   tailRate: 1.4,
   earPerk: 0,
   frontPaw: 0,
+  legTuck: 0,
 }
 
 const POSES: Record<AnimState, Partial<Pose>> = {
@@ -64,11 +67,12 @@ const POSES: Record<AnimState, Partial<Pose>> = {
   look: { earPerk: 0.35, tailWag: 0.16, tailRate: 2.2 },
   walk: { legSwing: 0.55, legRate: 9, tailBase: -0.75, tailWag: 0.18, tailRate: 5 },
   run: { legSwing: 0.9, legRate: 17, bodyRot: -0.1, tailBase: -1.15, tailWag: 0.22, tailRate: 9 },
-  sit: { bodyY: 7, bodyScaleY: 0.9, bodyScaleX: 1.04, tailBase: -0.15, tailWag: 0.1, tailRate: 1.1 },
+  sit: { bodyY: 11, bodyScaleY: 0.97, bodyScaleX: 1.02, legTuck: 0.55, tailBase: -0.15, tailWag: 0.1, tailRate: 1.1 },
   sleep: {
-    bodyY: 13,
-    bodyScaleY: 0.72,
-    bodyScaleX: 1.16,
+    bodyY: 14,
+    bodyScaleY: 0.95,
+    bodyScaleX: 1.04,
+    legTuck: 0.9,
     headY: 6,
     headRot: 0.22,
     eyeOpen: 0,
@@ -100,6 +104,13 @@ function css(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`
 }
 
+/** A darker shade of a packed colour, for the far (behind) legs. */
+function darken(color: number, amount: number): number {
+  const r = (color >> 16) & 0xff, g = (color >> 8) & 0xff, b = color & 0xff
+  const m = (c: number) => Math.round(c * (1 - amount))
+  return (m(r) << 16) | (m(g) << 8) | m(b)
+}
+
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number, fill: string): void {
   ctx.beginPath()
   ctx.roundRect(x, y, w, h, r)
@@ -127,6 +138,7 @@ export class CatRenderer {
   private coat: string
   private belly: string
   private accent: string
+  private shade: string
 
   private pose: Pose = { ...REST }
   private legPhase = 0
@@ -147,6 +159,7 @@ export class CatRenderer {
     this.coat = css(palette.coat)
     this.belly = css(palette.belly)
     this.accent = css(palette.accent)
+    this.shade = css(darken(palette.coat, 0.16))
   }
 
   /**
@@ -209,9 +222,9 @@ export class CatRenderer {
     }
 
     this.drawTail(ctx)
-    this.drawLegs(ctx, /* front */ false)
+    this.drawLegs(ctx, 'far')
     this.drawBody(ctx, breath, bob)
-    this.drawLegs(ctx, /* front */ true)
+    this.drawLegs(ctx, 'near')
     this.drawFrontPaw(ctx)
     this.drawHead(ctx, breath, bob)
     this.drawZs(ctx)
@@ -222,7 +235,9 @@ export class CatRenderer {
   private drawTail(ctx: CanvasRenderingContext2D): void {
     const p = this.pose
     ctx.save()
-    ctx.translate(-H * 0.31, -H * 0.4)
+    // The tail's root rides with the body's vertical offset, so it stays attached
+    // to the rump when the body sinks (e.g. while sleeping) instead of floating.
+    ctx.translate(-H * 0.31, -H * 0.4 + p.bodyY)
     for (let i = 0; i < TAIL_SEGMENTS; i++) {
       // Each joint lives in its parent's rotated frame, so transforms accumulate
       // down the chain without a save/restore per joint — that is what makes the
@@ -237,17 +252,52 @@ export class CatRenderer {
     ctx.restore()
   }
 
-  private drawLegs(ctx: CanvasRenderingContext2D, front: boolean): void {
+  private drawLegs(ctx: CanvasRenderingContext2D, layer: 'far' | 'near'): void {
     const p = this.pose
-    const xs = front ? [H * 0.1, H * 0.21] : [-H * 0.17, -H * 0.05]
-    for (let i = 0; i < xs.length; i++) {
-      // Global leg index across the four legs, so diagonal pairs stay in phase.
-      const index = front ? i + 2 : i
-      const offset = index === 0 || index === 3 ? 0 : Math.PI
+    const isFar = layer === 'far'
+    const color = isFar ? this.shade : this.coat
+    // Far pair: drawn behind the body, a shade darker, tucked further up so the
+    // body hides their tops. Near pair: in front. Flat-topped straight legs (a
+    // plain column into the body) with a small rounded foot — no rounded pill top.
+    const top = isFar ? -H * 0.28 : -H * 0.21
+    const len = isFar ? H * 0.3 : H * 0.23
+    // Phases follow a real cat's 4-beat lateral-sequence walk: each foot lands a
+    // quarter-cycle after the previous, in the order near-hind, near-front,
+    // far-hind, far-front — a smooth wave, not a two-beat diagonal bounce.
+    const legs: [number, number][] = isFar
+      ? [
+          [H * 0.22, Math.PI * 1.5], // far front
+          [-H * 0.28, Math.PI], // far back
+        ]
+      : [
+          [H * 0.11, Math.PI * 0.5], // near front
+          [-H * 0.16, 0], // near back
+        ]
+    // A leg is two segments hinged at a knee: an upper (hip→knee) that swings with
+    // the gait, and a lower (knee→paw) that folds back under the body when tucking.
+    const w = H * 0.08
+    const upperLen = len * 0.52
+    const lowerLen = len * 0.48
+    for (const [x, phase] of legs) {
+      // Tuck bends the knee (all legs by the same amount, same direction) so the
+      // shins fold back parallel under the body instead of the whole leg leaning as
+      // a rigid stick; the lowering body then hides the folded shins.
+      const swing = Math.sin(this.legPhase + phase) * p.legSwing
+      const kneeBend = p.legTuck * (Math.PI * 0.62)
       ctx.save()
-      ctx.translate(xs[i]!, -H * 0.19 + p.bodyY * 0.35)
-      ctx.rotate(Math.sin(this.legPhase + offset) * p.legSwing)
-      roundRect(ctx, -H * 0.045, 0, H * 0.09, H * 0.19, H * 0.045, this.coat)
+      ctx.translate(x, top + p.bodyY * 0.35)
+      ctx.rotate(swing)
+      ctx.fillStyle = color
+      // Upper leg (thigh): hip down to the knee.
+      ctx.fillRect(-w / 2, 0, w, upperLen)
+      // Knee joint — a small disc so the hinge has no square notch when bent.
+      ctx.translate(0, upperLen)
+      ellipse(ctx, 0, 0, w / 2, w / 2, color)
+      // Lower leg (shin): bends back at the knee.
+      ctx.rotate(kneeBend)
+      ctx.fillRect(-w / 2, 0, w, lowerLen)
+      // Rounded foot.
+      ellipse(ctx, 0, lowerLen, H * 0.052, H * 0.045, color)
       ctx.restore()
     }
   }
@@ -258,8 +308,37 @@ export class CatRenderer {
     ctx.translate(0, -H * 0.38 + p.bodyY - bob)
     ctx.rotate(p.bodyRot + (this.anim === 'dance' ? Math.sin(this.time * 6) * 0.12 : 0))
     ctx.scale(p.bodyScaleX * (1 - this.squash * 0.35), (p.bodyScaleY + breath) * (1 + this.squash * 0.45))
-    ellipse(ctx, 0, 0, H * 0.36, H * 0.23, this.coat)
-    ellipse(ctx, H * 0.04, H * 0.09, H * 0.26, H * 0.12, this.belly)
+    // A smooth, non-elliptical side body: chest at the front (+x, under the head),
+    // an arched back, a rounded rump toward the tail (-x) and a flatter belly.
+    // Drawn as a smooth closed curve — each control point is a corner, each anchor
+    // the midpoint between two corners, which keeps it round without lumps.
+    const pts: [number, number][] = [
+      [0.35, -0.02],
+      [0.25, -0.18],
+      [0.0, -0.23],
+      [-0.29, -0.17],
+      [-0.44, 0.03],
+      [-0.29, 0.22],
+      [0.0, 0.26],
+      [0.25, 0.18],
+    ]
+    ctx.beginPath()
+    const last = pts[pts.length - 1]!
+    ctx.moveTo(((last[0] + pts[0]![0]) / 2) * H, ((last[1] + pts[0]![1]) / 2) * H)
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i]!
+      const nxt = pts[(i + 1) % pts.length]!
+      ctx.quadraticCurveTo(cur[0] * H, cur[1] * H, ((cur[0] + nxt[0]) / 2) * H, ((cur[1] + nxt[1]) / 2) * H)
+    }
+    ctx.closePath()
+    ctx.fillStyle = this.coat
+    ctx.fill()
+    // Belly patch, clipped to the body so its lighter fill can never spill past
+    // the body's edge.
+    ctx.save()
+    ctx.clip()
+    ellipse(ctx, H * 0.03, H * 0.14, H * 0.28, H * 0.14, this.belly)
+    ctx.restore()
     ctx.restore()
   }
 
@@ -302,12 +381,30 @@ export class CatRenderer {
       ctx.restore()
     }
 
-    poly(ctx, [H * 0.17, H * 0.05, H * 0.23, H * 0.05, H * 0.2, H * 0.09], this.accent)
+    // Nose — centred between the eyes (their midpoint is x = 0.055H), below them.
+    const cx = H * 0.055
+    poly(ctx, [cx - H * 0.04, H * 0.045, cx + H * 0.04, H * 0.045, cx, H * 0.1], this.accent)
 
+    // Mouth: a little ω just under the nose.
+    ctx.strokeStyle = this.accent
+    ctx.lineWidth = Math.max(1, H * 0.013)
+    ctx.lineCap = 'round'
     ctx.beginPath()
-    for (const dy of [-0.02, 0.01, 0.04]) {
-      ctx.moveTo(H * 0.19, H * (0.05 + dy))
-      ctx.lineTo(H * 0.42, H * (0.03 + dy * 2.2))
+    ctx.moveTo(cx, H * 0.1)
+    ctx.lineTo(cx, H * 0.14)
+    ctx.moveTo(cx, H * 0.14)
+    ctx.quadraticCurveTo(cx - H * 0.04, H * 0.178, cx - H * 0.075, H * 0.145)
+    ctx.moveTo(cx, H * 0.14)
+    ctx.quadraticCurveTo(cx + H * 0.04, H * 0.178, cx + H * 0.075, H * 0.145)
+    ctx.stroke()
+
+    // Whiskers, fanning out from both cheeks.
+    ctx.beginPath()
+    for (const side of [-1, 1] as const) {
+      for (const dy of [-0.015, 0.015]) {
+        ctx.moveTo(cx + side * H * 0.05, H * (0.07 + dy))
+        ctx.lineTo(cx + side * H * 0.19, H * (0.06 + dy * 1.6))
+      }
     }
     ctx.lineWidth = Math.max(1, H * 0.012)
     ctx.strokeStyle = this.accent

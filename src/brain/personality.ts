@@ -81,14 +81,18 @@ export function runSpeed(traits: Traits): number {
   return 90 + traits.energy * 130
 }
 
+// Warm, desaturated coats read better against arbitrary desktop wallpaper than
+// saturated colours, which clash with whatever is behind them.
+export const COATS = [0xf2b48c, 0x9aa6b2, 0xd9d2c5, 0x6f6a68, 0xe8c07d, 0xb08968, 0x8d99ae]
+
+/** Which coat a seed maps to. Exposed so pet creation can keep coats distinct. */
+export function coatIndexForSeed(seed: number): number {
+  return Math.floor(mulberry32(seed ^ 0x9e3779b9)() * COATS.length)
+}
+
 /** Colour palette derived from the seed, so pets are visually distinguishable. */
 export function buildPalette(seed: number): { coat: number; belly: number; accent: number } {
-  const rand = mulberry32(seed ^ 0x9e3779b9)
-  const hue = rand()
-  // Warm, desaturated coats read better against arbitrary desktop wallpaper
-  // than saturated colours, which clash with whatever is behind them.
-  const coats = [0xf2b48c, 0x9aa6b2, 0xd9d2c5, 0x6f6a68, 0xe8c07d, 0xb08968, 0x8d99ae]
-  const coat = coats[Math.floor(hue * coats.length)]!
+  const coat = COATS[coatIndexForSeed(seed)]!
   return {
     coat,
     belly: lighten(coat, 0.35),

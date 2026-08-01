@@ -5,6 +5,7 @@ import { createOverlay, refitOverlay } from './overlay'
 import { Sensors } from './sensors'
 import { store, freshMemory } from './store'
 import { chat, learnName } from './chat'
+import { coatIndexForSeed } from '../src/brain/personality'
 import type { PetIdentity, PetMemory, PetSpawn, Settings, WorldEnv } from '../src/shared/types'
 
 /**
@@ -25,7 +26,7 @@ import type { PetIdentity, PetMemory, PetSpawn, Settings, WorldEnv } from '../sr
 
 let tray: Tray | null = null
 let sensors: Sensors | null = null
-let settings: Settings = { scale: 1, fps: 30, useWindows: true, pets: 1, aiChat: false, aiModel: 'claude-opus-5' }
+let settings: Settings = { scale: 1.5, fps: 30, useWindows: true, pets: 1, aiChat: false, aiModel: 'claude-opus-5' }
 
 /** Authoritative long-term memory, one entry per pet. Persisted from here only. */
 let pets: PetMemory[] = []
@@ -52,7 +53,9 @@ const primaryId = (): number => screen.getPrimaryDisplay().id
 /** Grow or shrink the population to match the desired count in settings. */
 function reconcilePetCount(): void {
   const want = Math.max(1, Math.min(6, settings.pets))
-  while (pets.length < want) pets.push(freshMemory(pets.length))
+  while (pets.length < want) {
+    pets.push(freshMemory(pets.length, pets.map((p) => coatIndexForSeed(p.seed))))
+  }
   if (pets.length > want) {
     for (const removed of pets.splice(want)) assignment.delete(removed.seed)
   }
@@ -193,7 +196,7 @@ function refreshTrayMenu(): void {
       {
         label: 'Size',
         submenu: (['Small', 'Normal', 'Large'] as const).map((label, index) => {
-          const scale = [0.7, 1, 1.5][index]!
+          const scale = [1, 1.5, 2.3][index]!
           return {
             label,
             type: 'radio' as const,
@@ -232,7 +235,10 @@ function refreshTrayMenu(): void {
 }
 
 function resetPets(): void {
-  pets = Array.from({ length: Math.max(1, settings.pets) }, (_, i) => freshMemory(i))
+  pets = []
+  for (let i = 0; i < Math.max(1, settings.pets); i++) {
+    pets.push(freshMemory(i, pets.map((p) => coatIndexForSeed(p.seed))))
+  }
   assignment.clear()
   ensureAssignments()
   store.savePets(pets)

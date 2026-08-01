@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import type { PetMemory, Settings } from '../src/shared/types'
+import { COATS, coatIndexForSeed } from '../src/brain/personality'
 
 /**
  * Flat-file persistence. JSON rather than SQLite on purpose: the whole dataset is
@@ -41,8 +42,17 @@ function writeJson(file: string, value: unknown): void {
   renameSync(temp, target)
 }
 
-export function freshMemory(index = 0): PetMemory {
-  const seed = Math.floor(Math.random() * 2 ** 31)
+export function freshMemory(index = 0, takenCoats: Iterable<number> = []): PetMemory {
+  // Pick a seed whose coat isn't already worn by a sibling pet, so a litter of
+  // several cats is visually distinct. Once every coat is in use (more pets than
+  // colours) we stop insisting and let them repeat.
+  const taken = new Set(takenCoats)
+  let seed = Math.floor(Math.random() * 2 ** 31)
+  if (taken.size < COATS.length) {
+    for (let tries = 0; tries < 64 && taken.has(coatIndexForSeed(seed)); tries++) {
+      seed = Math.floor(Math.random() * 2 ** 31)
+    }
+  }
   return {
     name: NAMES[(seed + index) % NAMES.length]!,
     seed,
@@ -76,7 +86,7 @@ function trim(memory: PetMemory): PetMemory {
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  scale: 1,
+  scale: 1.5,
   fps: 30,
   useWindows: true,
   pets: 1,

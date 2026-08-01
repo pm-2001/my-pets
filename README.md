@@ -14,6 +14,11 @@ for itself what to do next.
 *Awake (tail up, blinking, whiskers) and asleep (flattened, eyes closed, floating Z). The
 pet is drawn procedurally in code — there are no image assets.*
 
+> **What's new in 0.2.0** — redrawn cat with a smoother body, a real four-beat walking
+> gait and knee-jointed legs that fold when it sits or sleeps; every cat in a litter now
+> gets a distinct coat colour; and larger size presets. Full list in
+> [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## Status
@@ -63,6 +68,28 @@ platforms are not supported yet (see [Roadmap](#roadmap)).
 
 > Requires **macOS 11+** and **Node.js 20 or 22 (LTS)**. A *nightly/odd-numbered* Node can
 > break Electron's install step — see [Troubleshooting](#troubleshooting).
+
+### Update an existing install
+
+First **quit the running cat** from the menu-bar icon, then pull the newest version:
+
+```bash
+# If you installed the command globally:
+npm install -g meowverlay@latest && meowverlay
+
+# If you run it with npx (npx caches, so pin @latest to force the newest):
+npx meowverlay@latest
+```
+
+Check what you have versus what's published:
+
+```bash
+npm view meowverlay version      # latest published version
+npm ls -g meowverlay             # the version installed globally
+```
+
+Your cats' names, personalities, memories and settings are kept in
+`~/Library/Application Support/meowverlay/` and survive updates untouched.
 
 ## Run from source (development)
 
