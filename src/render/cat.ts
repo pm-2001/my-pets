@@ -347,6 +347,15 @@ export class CatRenderer {
       const hw = H * 0.042 // half-width of the wedge base along the back
       poly(ctx, [sx * H - hw, -H * 0.26, sx * H + hw, -H * 0.26, (sx - 0.025) * H, H * 0.04], this.stripe)
     }
+    // Lighting pass: a soft highlight along the lit back fading to a shadow under
+    // the belly, so the flat coat reads as a rounded body rather than a cutout.
+    const g = ctx.createLinearGradient(0, -H * 0.24, 0, H * 0.27)
+    g.addColorStop(0, 'rgba(255,255,255,0.16)')
+    g.addColorStop(0.42, 'rgba(255,255,255,0)')
+    g.addColorStop(0.68, 'rgba(0,0,0,0)')
+    g.addColorStop(1, 'rgba(0,0,0,0.17)')
+    ctx.fillStyle = g
+    ctx.fillRect(-H * 0.5, -H * 0.3, H, H * 0.6)
     ctx.restore()
     ctx.restore()
   }
@@ -390,6 +399,14 @@ export class CatRenderer {
       const hw = H * 0.022
       poly(ctx, [fx * H - hw, -H * 0.24, fx * H + hw, -H * 0.24, (fx + 0.008) * H, -H * 0.09], this.stripe)
     }
+    // Lighting pass: a soft top-left highlight fading to a shadow at the jaw, so
+    // the head reads as a sphere. Drawn under the eyes/nose so features stay crisp.
+    const hg = ctx.createRadialGradient(-H * 0.06, -H * 0.08, H * 0.02, 0, H * 0.02, H * 0.26)
+    hg.addColorStop(0, 'rgba(255,255,255,0.18)')
+    hg.addColorStop(0.5, 'rgba(255,255,255,0)')
+    hg.addColorStop(1, 'rgba(0,0,0,0.15)')
+    ctx.fillStyle = hg
+    ctx.fillRect(-H * 0.24, -H * 0.24, H * 0.48, H * 0.48)
     ctx.restore()
 
     for (const side of [-1, 1] as const) {

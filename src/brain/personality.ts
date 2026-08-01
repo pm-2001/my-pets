@@ -81,9 +81,10 @@ export function runSpeed(traits: Traits): number {
   return 90 + traits.energy * 130
 }
 
-// Warm, desaturated coats read better against arbitrary desktop wallpaper than
-// saturated colours, which clash with whatever is behind them.
-export const COATS = [0xf2b48c, 0x9aa6b2, 0xd9d2c5, 0x6f6a68, 0xe8c07d, 0xb08968, 0x8d99ae]
+// Rich, natural cat coats — vivid enough to pop on the desktop while still
+// reading as a real cat: ginger, blue-grey, cream, brown tabby, charcoal,
+// cinnamon and silver.
+export const COATS = [0xf59331, 0x6d84a6, 0xf4dcb0, 0x9a6532, 0x4d4c58, 0xc0743a, 0xa7b0bb]
 
 /** Which coat a seed maps to. Exposed so pet creation can keep coats distinct. */
 export function coatIndexForSeed(seed: number): number {
